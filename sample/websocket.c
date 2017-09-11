@@ -284,13 +284,20 @@ static void drained_writecb(struct bufferevent *bev, void *ctx);
 static void eventcb(struct bufferevent *bev, short what, void *ctx);
 
 static int callback(void *bev, int argc, char **argv, char **azColName){
+   printf("callback argc=%d\n",argc);
    struct evbuffer* dst = bufferevent_get_output(bev);
    int i;
    char buff[1024];
+   char sendbuff[1024];
+   int sendbuff_len = 1024;
    for(i=0; i<argc; i++){
-   	  int len = snprintf(buff,sizeof(buff),"%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+   		int len = snprintf(buff,sizeof(buff),"%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
       //printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
-      evbuffer_add(dst,buff,len);
+      //evbuffer_add(dst,buff,len);
+		char sendbuff[1024];
+		int sendbuff_len = 1024;
+		buildFrame(buff,strlen(buff),sendbuff,&sendbuff_len);
+		evbuffer_add(dst,sendbuff,sendbuff_len);  
    }
    //printf("\n");
    return 0;
@@ -360,20 +367,17 @@ readcb_frame(struct bufferevent *bev, void *ctx){
 	printf("%s\n","readcb_frame");
 	struct evbuffer* src = bufferevent_get_input(bev);
 	size_t len = evbuffer_get_length(src);
+	if(len < 3){
+		printf("error len = %d\n",(int)len);
+		return;
+	}
+	
 	printf("len=%d\n",(int)len);
 	char buff[len];
-	evbuffer_remove(src,buff,len);
+	evbuffer_copyout(src,buff,len);
+	//evbuffer_remove(src,buff,len);
 
-	
-	//int i;
-	//for(i = 0;i<len;i++){
-	//	printf("%02x ",buff[i]&0xFFu);
-	//}
-	//printf("\n");
-	
-	//struct ws_frame* wsf = (struct ws_frame*)buff;
-	//printf("wsf->fin=%u wsf->rsv1=%u wsf->opcode=%u wsf->masked=%u wsf->payload_len=%u\n",
-	//							wsf->fin,wsf->rsv1,wsf->opcode,wsf->masked,wsf->payload_len);
+
 	int pos = 0;
 	unsigned char fin = (unsigned char)buff[pos] >> 7;
 	unsigned char opcode = (unsigned char)buff[pos] & 0x0f;
@@ -384,20 +388,28 @@ readcb_frame(struct bufferevent *bev, void *ctx){
 		return;
 	}
 
-	
 	pos++;
 	unsigned char mask = (unsigned char)buff[pos] >> 7;
 	unsigned char payload_length = (unsigned char)buff[pos] &0x7f;
 	pos++;
 	if(payload_length == 126){
+		if(pos + 2 > len){
+			printf("error pos=%d\n",pos);
+			return;
+		}		
 		uint16_t length = 0;
 		memcpy(&length, buff + pos, 2);
 		pos += 2;
+
 		payload_length = ntohs(length);
 	}
 	else if(payload_length == 127){
+		if(pos + 8 > len){
+			printf("error pos=%d\n",pos);
+			return;
+		}		
 		uint64_t length = 0;
-		memcpy(&length, buff + pos, 8);
+		memcpy(&length, buff + pos, 8);		
 		pos += 8;
 		char buff[8];
 		int i;
@@ -410,30 +422,59 @@ readcb_frame(struct bufferevent *bev, void *ctx){
 	}
 	printf("fin=%d opcode=%d mask=%d payload_length=%d\n",fin,opcode,mask,payload_length);
 	if(mask){
+		if(pos + 4 > len){
+			printf("error pos=%d\n",pos);
+			return;
+		}		
 		char masking_key[4];
 		memcpy(masking_key,buff+pos,4);
 		pos += 4;
-		char buff_out[payload_length+1];
+
+		if(pos + payload_length > len){
+			printf("error pos=%d\n",pos);
+			return;
+		}
+		
+		char buff_out[payload_length+1];//one postion for '\0'
 		int i;
 		for(i = 0;i<payload_length;i++){
 			buff_out[i] = buff[pos+i] ^ masking_key[i%4];
 		}
+		pos += payload_length;
+
+		if(pos > len){
+			printf("error pos=%d\n",pos);
+			return;
+		}
+
+
 		buff_out[payload_length] = '\0';
 		printf("buff_out=%s\n",buff_out);
+
+		char *errmsg = NULL;
+		int rc = sqlite3_exec(db,buff_out,callback,bev,&errmsg);
+		if( rc != SQLITE_OK ){
+		   fprintf(stderr, "SQL error: %s\n", errmsg);
+		   sqlite3_free(errmsg);
+		}
+		
+			
 	}
 
-	char sendbuff[1024];
-	int sendbuff_len = 1024;
-	char* sendstr = "worldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworld";
+	evbuffer_drain(src,pos);
+
+	//char sendbuff[1024];
+	//int sendbuff_len = 1024;
+	//char* sendstr = "worldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworld";
 	
-	buildFrame(sendstr,strlen(sendstr),sendbuff,&sendbuff_len);
-	printf("sendbuff_len=%d\n",sendbuff_len);
-	struct evbuffer* dst = bufferevent_get_output(bev);
-	size_t len_out = evbuffer_get_length(dst);
-	printf("len_out=%d\n",len_out);
-	evbuffer_add(dst,sendbuff,sendbuff_len);
-	len_out = evbuffer_get_length(dst);
-	printf("len_out=%d\n",len_out);
+	//buildFrame(sendstr,strlen(sendstr),sendbuff,&sendbuff_len);
+	//printf("sendbuff_len=%d\n",sendbuff_len);
+	//struct evbuffer* dst = bufferevent_get_output(bev);
+	//size_t len_out = evbuffer_get_length(dst);
+	//printf("len_out=%d\n",len_out);
+	//evbuffer_add(dst,sendbuff,sendbuff_len);
+	//len_out = evbuffer_get_length(dst);
+	//printf("len_out=%d\n",len_out);
 	
 }
 

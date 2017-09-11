@@ -474,7 +474,10 @@ eventcb(struct bufferevent *bev, short what, void *ctx)
 	printf("eventcb\n");
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
 		printf("eventcb close\n");
-		bufferevent_free(bev);
+		evutil_socket_t fd = bufferevent_getfd(bev);
+		assert(fd > -1);
+		clst[fd] = NULL;		
+		bufferevent_free(bev);	
 	}
 }
 
