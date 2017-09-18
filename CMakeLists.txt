@@ -865,6 +865,7 @@ if (NOT EVENT__DISABLE_SAMPLES)
         hello
         echo
         srs
+        websocket
         )
 
     if (NOT EVENT__DISABLE_OPENSSL AND OPENSSL_LIBRARIES)
@@ -908,6 +909,8 @@ if (NOT EVENT__DISABLE_SAMPLES)
                     lua
                     zkmt
                     hashtable
+                    uuid
+                    crypto
                     )
 
         add_dependencies(${SAMPLE} event_extra)
@@ -1041,12 +1044,14 @@ if (NOT EVENT__DISABLE_TESTS)
         # then you can just run 'make tests' instead of them all
         # auto-compile|running
         # - ellzey
+    include_directories("/home/lindianyin/libevent/test")
     set(TESTPROGS   test-changelist
                     test-eof
                     test-fdleak
                     test-init
                     test-time
                     test-weof)
+
 
     set(ALL_TESTPROGS
             ${TESTPROGS}

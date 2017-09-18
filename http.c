@@ -741,6 +741,10 @@ evhttp_connection_fail_(struct evhttp_connection *evcon,
 	void *cb_arg;
 	void (*error_cb)(enum evhttp_request_error, void *);
 	void *error_cb_arg;
+	if(NULL == req){
+		return;
+	}
+
 	EVUTIL_ASSERT(req != NULL);
 
 	bufferevent_disable(evcon->bufev, EV_READ|EV_WRITE);
@@ -1322,6 +1326,9 @@ evhttp_connection_reset_(struct evhttp_connection *evcon)
 	struct evbuffer *tmp;
 	int err;
 
+	bufferevent_setcb(evcon->bufev, NULL, NULL, NULL, NULL);
+
+	
 	/* XXXX This is not actually an optimal fix.  Instead we ought to have
 	   an API for "stop connecting", or use bufferevent_setfd to turn off
 	   connecting.  But for Libevent 2.0, this seems like a minimal change

@@ -31,6 +31,8 @@
 #include <event2/util.h>
 
 #include <event2/tree.h>
+#include <event2/queue.h>
+
 
 
 #include <openssl/ssl.h>
@@ -429,6 +431,24 @@ HT_PROTOTYPE(hthead, htnode, node, hash_htnode,
 HT_GENERATE(hthead, htnode, node, hash_htnode,
     eq_htnode, 0.5, malloc, realloc, free)
 
+//slist
+struct slist_node{
+	SLIST_ENTRY(slist_node) slist_nodes;
+	int val;
+};
+
+SLIST_HEAD(slist_head,slist_node);
+
+//list
+struct list_node{
+	LIST_ENTRY(list_node) list_nodes;
+	int val;
+};
+
+LIST_HEAD(list_head,list_node);
+
+
+
 
 
 int
@@ -439,6 +459,96 @@ main(int argc, char **argv)
 	int ret;
 
 	struct evconnlistener *listener;
+
+
+	{
+		//SLIST_INIT(slist);
+		struct slist_head  slhead = SLIST_HEAD_INITIALIZER(slhead);
+		SLIST_INIT(&slhead);
+		struct slist_node *p = malloc(sizeof(struct slist_node));
+		p->val = 1;
+		SLIST_INSERT_HEAD(&slhead,p,slist_nodes);
+		struct slist_node *p1 = malloc(sizeof(struct slist_node));
+		p1->val = 2;
+		SLIST_INSERT_HEAD(&slhead,p1,slist_nodes);
+
+		struct slist_node *var = NULL;
+		SLIST_FOREACH(var, &slhead, slist_nodes){
+			printf("val1=%d\n",var->val);
+		}
+
+	}
+
+	{
+		struct list_head lhead = LIST_HEAD_INITIALIZER(list_head);
+		LIST_INIT(&lhead);
+		struct list_node *p = malloc(sizeof(struct list_node));
+		p->val = 10;
+		struct list_node *p1 = malloc(sizeof(struct list_node));
+		p1->val = 20;
+		struct list_node *p2 = malloc(sizeof(struct list_node));
+		p2->val = 10;		
+		LIST_INSERT_HEAD(&lhead,p,list_nodes);
+		LIST_INSERT_HEAD(&lhead,p1,list_nodes);
+		LIST_INSERT_HEAD(&lhead,p2,list_nodes);
+		struct list_node *var = NULL;
+		LIST_FOREACH(var,&lhead,list_nodes){
+			printf("val2_befor=%d\n",var->val);
+		}
+		
+		for(var = LIST_FIRST(&lhead); var != LIST_END(lhead);){
+			if(10 == var->val){
+				LIST_REMOVE(var,list_nodes);
+				var = LIST_NEXT(var,list_nodes);
+				free(var);
+				continue;
+			}else{
+				var = LIST_NEXT(var,list_nodes);
+			}
+		}
+
+		LIST_FOREACH(var,&lhead,list_nodes){
+			printf("val2_after=%d\n",var->val);
+		}
+
+	}
+
+
+	{
+
+	
+
+
+
+
+
+	}
+	
+
+
+	{
+		//SLIST_INIT(slist);
+		struct slist_head  slhead = SLIST_HEAD_INITIALIZER(slhead);
+		SLIST_INIT(&slhead);
+		struct slist_node *p = malloc(sizeof(struct slist_node));
+		p->val = 1;
+		SLIST_INSERT_HEAD(&slhead,p,slist_nodes);
+		struct slist_node *p1 = malloc(sizeof(struct slist_node));
+		p1->val = 2;
+		SLIST_INSERT_HEAD(&slhead,p1,slist_nodes);
+
+		struct slist_node *var = NULL;
+		SLIST_FOREACH(var, &slhead, slist_nodes){
+			printf("val=%d\n",var->val);
+		}
+
+	}
+
+
+
+
+
+	
 
 	if (argc < 2)
 		syntax();

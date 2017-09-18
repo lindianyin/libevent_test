@@ -189,7 +189,8 @@ main(int argc, char **argv)
 
 	struct evhttp_uri *http_uri = NULL;
 	const char *url = NULL, *data_file = NULL;
-	const char *crt = "/etc/ssl/certs/ca-certificates.crt";
+	//const char *crt = "/etc/ssl/certs/ca-certificates.crt";
+	const char *crt = "/etc/pki/tls/certs/ca-bundle.crt";
 	const char *scheme, *host, *path, *query;
 	char uri[256];
 	int port;

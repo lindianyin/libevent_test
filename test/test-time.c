@@ -93,6 +93,24 @@ main(int argc, char **argv)
 #endif
 
 	evutil_weakrand_seed_(&weakrand_state, 0);
+	int cnt = 0;
+	for(i = 0;i<100000;i++){
+		ev_int32_t rand = evutil_weakrand_range_(&weakrand_state,10);
+		if(rand == 0){
+			cnt++;
+		}
+	}
+	printf("cnt=%d cnt/100000.0=%f\n",cnt,cnt/100000.0);
+
+	char *lua = "numid=28584376;areaid=1;nickname='dzMan16';vipid=0;right=0;charm=0;family=0;contribution=0;score=0;rich=144656200;dou=144656200;exp=11;win=29;lose=23;draw=3;escape=0;typescore=144656200;robot=0;netspeed=0;ganyu=0;ip='192.168.138.32';todayrich=2500000;clienttype=2;hardwareflag=0;picid=0;seat=0;osver=0;dw=0;gametime=20;elimited=0;todayallrich=2500000;monthrich=0;monthallrich=0;newplay=0;bankrich=0;ctype=0;";
+	//char *lua = "todayrich=2500000;numid=28584376;areaid=1;nickname='dzMan16';vipid=0;right=0;charm=0;family=0;contribution=0;score=0;rich=144656200;dou=144656200;exp=11;win=29;lose=23;draw=3;escape=0;typescore=144656200;robot=0;netspeed=0;ganyu=0;ip='192.168.138.32';clienttype=2;hardwareflag=0;picid=0;seat=0;osver=0;dw=0;gametime=20;elimited=0;todayallrich=2500000;monthrich=0;monthallrich=0;newplay=0;bankrich=0;ctype=0;";
+	int64_t v;
+	char* plua = strstr(lua,"todayrich");
+	int ret = sscanf(plua,"todayrich=%lld;",&v);
+	printf("ret = %d v=%lld\n",ret,v);
+	printf("sizeof(double)=%zu\n",sizeof(double));
+	printf("short(100)=%hhd\n",(short)65536);
+
 
 	/* Initalize the event library */
 	event_init();
