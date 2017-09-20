@@ -543,11 +543,6 @@ main(int argc, char **argv)
 		}
 
 	}
-
-
-
-
-
 	
 
 	if (argc < 2)
@@ -610,6 +605,11 @@ main(int argc, char **argv)
 
 	L = lua_open();
 	luaL_openlibs(L);
+
+	evthread_use_pthreads();//this must be called first befor any other libevent funtion
+	assert(1 == EVTHREAD_LOCKING_ENABLED());
+
+	
 
 
 	base = event_base_new();

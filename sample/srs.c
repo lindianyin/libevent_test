@@ -552,6 +552,8 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 	}
+	evthread_use_pthreads();//this must be called first befor any other libevent funtion
+	assert(1 == EVTHREAD_LOCKING_ENABLED());
 
 	base = event_base_new();
 	if (!base) {
@@ -608,7 +610,7 @@ int main(int argc, char **argv)
 			listen_addr,(struct sockaddr*)&listen_on_addr, &socklen) <0) {
 		return 0;
 	}
-	evthread_use_pthreads();
+	
 	
 	evutil_weakrand_seed_(&wr,0);
 	srand(time(NULL)^getpid());
