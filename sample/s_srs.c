@@ -33,6 +33,9 @@
 #include <event2/tree.h>
 #include <event2/thread.h>
 
+#include <event2/queue.h>
+
+
 #include "event-internal.h"
 #include "util-internal.h"
 #include "mm-internal.h"
@@ -73,8 +76,8 @@
 		struct timeval tv;\
 		gettimeofday(&tv,NULL);\
 		int len = evutil_snprintf(buff,sizeof(buff),\
-			"%04d-%02d-%02d %02d:%02d:%02d.%03ld %5s %20s +%-5d%-10s",\
-			tmm->tm_year+1900,tmm->tm_mon+1,tmm->tm_mday,tmm->tm_hour,tmm->tm_min,tmm->tm_sec,tv.tv_usec/1000,flags[level],__FILE__ ,__LINE__,__FUNCTION__);\
+			"%04d-%02d-%02d %02d:%02d:%02d.%03ld %x %5s %20s +%-5d%-15s",\
+			tmm->tm_year+1900,tmm->tm_mon+1,tmm->tm_mday,tmm->tm_hour,tmm->tm_min,tmm->tm_sec,tv.tv_usec/1000,EVTHREAD_GET_ID(),flags[level],__FILE__ ,__LINE__,__FUNCTION__);\
 		len = evutil_snprintf(buff+len,(sizeof(buff))- len,fmt,__VA_ARGS__);\
 		fprintf(stderr,buff);\
 		fprintf(stderr,"\n");\
@@ -158,40 +161,42 @@ readcb_r(struct bufferevent *bev, void *ctx);
 
 void strings_completion_t_(int rc,
         const struct String_vector *strings, const void *data){
-    printf("strings_completion_t_ strings=%p;data=%p;strings->count=%d;\n",strings,data,strings->count);
+
+	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
+	__LOG__(__LOG_MSG_,"strings_completion_t_ strings=%p;data=%p;strings->count=%d;",strings,data,strings->count);
+	
 	int i,len;
 	char buff[256];
 	char buffer[1024];
-	buffer[0] = '\0';
+	memset(buffer,0,sizeof(buffer));
 	int  buffer_len= sizeof(buffer);
 	struct Stat stat;
 	(void)buffer_len;
 	for(i=0;i<strings->count;i++){
-		printf("child_path=%s\n",(strings->data)[i]);
+		__LOG__(__LOG_MSG_,"child_path=%s",(strings->data)[i]);
 		len = snprintf(buff,sizeof(buff),"%s/%s",root_path,(strings->data)[i]);
 		assert(len < sizeof(buff));
 		rc = zoo_get(zh,buff,1,buffer,&buffer_len,&stat);
-		fprintf(stderr,"buffer=%s\n",buffer);
+		__LOG__(__LOG_MSG_,"buffer=%s",buffer);
 		//rc = zoo_exists(zh,buff,1,&stat);
 		if(ZOK != rc){
-			fprintf(stderr,"Error rc=%d\n",rc);
+			__LOG__(__LOG_MSG_,"Error rc=%d",rc);
 		}
 
-		//connect to server
 		//connect to server
 		struct sockaddr_storage ss;
 		int sl = sizeof(ss);
 		if (evutil_parse_sockaddr_port(
 					buffer,(struct sockaddr*)&ss, &sl) <0) {
-			printf("can't parse  %s\n",buffer);
-			return;
+			__LOG__(__LOG_ERROR_,"can't parse  %s",buffer);
+			continue;
 		}
 		
 		struct bufferevent * b_out = bufferevent_socket_new(base, -1,
 		    	BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
 		if(-1 == bufferevent_socket_connect(b_out,(struct sockaddr*)&ss,sl)){
-			printf("can't connect %s\n",buffer);
-			return;
+			__LOG__(__LOG_ERROR_,"can't connect %s",buffer);
+			continue;
 		}
 		
 		bufferevent_setcb(b_out, readcb_r, NULL, eventcb_r, NULL);
@@ -199,15 +204,16 @@ void strings_completion_t_(int rc,
 		evutil_socket_t fd = bufferevent_getfd(b_out);
 		lst[fd] = b_out;
 		lst_path[fd] = strdup(buffer);
-		fprintf(stderr, "fd =%u \n", fd);
-
+		__LOG__(__LOG_MSG_,"fd =%u", fd);
 		
 	}
+
+	EVBASE_RELEASE_LOCK(base, th_base_lock);	
 }
 
 void strings_completion_t_1(int rc,
         const struct String_vector *strings, const void *data){
-    printf("strings_completion_t_ strings=%p;data=%p;strings->count=%d;\n",strings,data,strings->count);
+    printf("strings_completion_t_ strings=%p;data=%p;strings->count=%d;",strings,data,strings->count);
 	int i,len;
 	char buff[256];
 	char buffer[1024];
@@ -215,13 +221,13 @@ void strings_completion_t_1(int rc,
 	struct Stat stat;
 	(void)buffer_len;
 	for(i=0;i<strings->count;i++){
-		printf("child_path=%s\n",(strings->data)[i]);
+		printf("child_path=%s",(strings->data)[i]);
 		len = snprintf(buff,sizeof(buff),"%s/%s",root_path,(strings->data)[i]);
 		assert(len < sizeof(buff));
 		rc = zoo_get(zh,buff,1,buffer,&buffer_len,&stat);
 		//rc = zoo_exists(zh,buff,1,&stat);
 		if(ZOK != rc){
-			fprintf(stderr,"Error rc=%d\n",rc);
+			fprintf(stderr,"Error rc=%d",rc);
 		}
 	}
 }
@@ -235,24 +241,98 @@ static void
 eventcb_r(struct bufferevent *bev, short what, void *ctx);
 
 
+struct watch_st{
+	zhandle_t *zzh;
+	int type;
+	int status;
+	const char* path;
+	void* context;
+};
+
+//list
+struct queue_node{
+	SIMPLEQ_ENTRY(list_node) queue_nodes;
+	struct watch_st *val;
+};
+
+SIMPLEQ_HEAD(queue_head,queue_node);
+
+
+void* qlock = NULL;
+
+struct queue_head watchqueue = LIST_HEAD_INITIALIZER(queue_head);
+
+void my_stat_completion(int rc, const struct Stat *stat, const void *data);
+
+void watcher_1(zhandle_t *zzh, int type, int state, const char *path,
+             void* context)
+{
+	__LOG__(__LOG_MSG_,"watcher_1 %s state = %s", type2String(type), state2String(state));
+	EVLOCK_LOCK(qlock,0);
+
+    if (path && strlen(path) > 0) {
+	 	 __LOG__(__LOG_MSG_,"for path %s", path);
+		struct queue_node * pn = mm_calloc(1,sizeof(*pn));
+		struct watch_st * pw = mm_calloc(1,sizeof(*pw));
+		pw->zzh = zzh;
+		pw->type = type;
+		pw->status = state;
+		pw->context = context;
+		pw->path = strdup(path);
+		pn->val = pw;
+
+		SIMPLEQ_INSERT_TAIL(&watchqueue,pn,queue_nodes);
+		
+		
+
+	}else{
+		__LOG__(__LOG_ERROR_,"watcher_1 %s state = %s", type2String(type), state2String(state));
+	}
+
+	EVLOCK_UNLOCK(qlock,0);
+	return;
+}
+
+
+
+
 
 void watcher(zhandle_t *zzh, int type, int state, const char *path,
              void* context)
 {
+	//EVLOCK_LOCK(qlock,0);	
+	//struct queue_node * pn = mm_malloc(sizeof(*pn));
+	//struct watch_st * pw = mm_malloc(sizeof(*pw));
+	//pw->zzh = zzh;
+	//pw->type = type;
+	//pw->status = strdup(path);
+	//pw->context = context;
+	//pn->val = pw;
+
+	//SIMPLEQ_INSERT_TAIL(&watchqueue,pn,queue_nodes);
+
+	//struct Stat stat1;
+	//zoo_exists(zh,path,1,&stat1);
+
+	//EVLOCK_UNLOCK(qlock,0);
+	//return;
+
+	zoo_aexists(zh, path, 1, my_stat_completion, strdup(path));
+
     /* Be careful using zh here rather than zzh - as this may be mt code
      * the client lib may call the watcher before zookeeper_init returns */
 	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
-    fprintf(stderr, "Watcher %s state = %s", type2String(type), state2String(state));
+	__LOG__(__LOG_MSG_,"Watcher %s state = %s", type2String(type), state2String(state));
     if (path && strlen(path) > 0) {
-      fprintf(stderr, " for path %s", path);
+      //fprintf(stderr, " for path %s", path);
+	  __LOG__(__LOG_MSG_,"for path %s", path);
     }
-    fprintf(stderr, "\n");
-
-	struct Stat stat;
-	zoo_exists(zh,path,1,&stat);
-
-	printf("watcher thread tid = %lx\n", EVTHREAD_GET_ID());  
-	
+    //fprintf(stderr, "\n");
+	//return;
+	//struct Stat stat;
+	//zoo_exists(zh,path,1,&stat);
+ 
+	 __LOG__(__LOG_MSG_,"watcher thread tid = %lx", EVTHREAD_GET_ID());
 	
 	if(ZOO_CREATED_EVENT == type 
 		&& ZOO_CONNECTED_STATE == state){
@@ -261,16 +341,17 @@ void watcher(zhandle_t *zzh, int type, int state, const char *path,
 		char *buffer = malloc(buffer_len);
 		buffer[0] = '\0';
 		struct Stat stat;
-		int rc = zoo_get(zh, path, 0, buffer,   
+		int rc = zoo_get(zh, path, 1, buffer,   
 						   	&buffer_len, &stat);
-		fprintf(stderr, "buffer=%s \n", buffer);
+		__LOG__(__LOG_MSG_,"buffer=%s ", buffer);
 
+	
 		//connect to server
 		struct sockaddr_storage ss;
 		int sl = sizeof(ss);
 		if (evutil_parse_sockaddr_port(
 					buffer,(struct sockaddr*)&ss, &sl) <0) {
-			printf("can't parse  %s\n",buffer);
+			__LOG__(__LOG_ERROR_,"can't parse  %s",buffer);
 			//return;
 			free(buffer);
 			goto out;
@@ -279,7 +360,7 @@ void watcher(zhandle_t *zzh, int type, int state, const char *path,
 		struct bufferevent * b_out = bufferevent_socket_new(base, -1,
 		    	BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
 		if(-1 == bufferevent_socket_connect(b_out,(struct sockaddr*)&ss,sl)){
-			printf("can't connect %s\n",buffer);
+			__LOG__(__LOG_ERROR_,"can't connect %s",buffer);
 			//return;
 			free(buffer);
 			goto out;
@@ -290,19 +371,20 @@ void watcher(zhandle_t *zzh, int type, int state, const char *path,
 		evutil_socket_t fd = bufferevent_getfd(b_out);
 		lst[fd] = b_out;
 		lst_path[fd] = strdup(path);
-		fprintf(stderr, "fd =%u \n", fd);
-		
+		__LOG__(__LOG_MSG_,"fd =%u", fd);
 
 		if(ZOK != rc){
-			 fprintf(stderr, "Error %d \n", rc);
+			 __LOG__(__LOG_ERROR_,"Error %d", rc);
 		}
+
+		
 	}else if(ZOO_DELETED_EVENT == type 
 		&& ZOO_CONNECTED_STATE == state){
-		fprintf(stderr, "delete \n");
+		 __LOG__(__LOG_ERROR_,"%s", "delete");
 		int i;
 		for(i = 0;i<1024;i++){
 			if(lst_path[i] && 0 == strcmp(lst_path[i],path)){
-				fprintf(stderr, "lst_path[i]=%s \n",lst_path[i]);
+				 __LOG__(__LOG_ERROR_,"lst_path[i]=%s",lst_path[i]);
 				int fd = i;
 				struct bufferevent * ev = lst[fd];
 				if(NULL != ev){
@@ -311,7 +393,8 @@ void watcher(zhandle_t *zzh, int type, int state, const char *path,
 					lst[fd] = NULL;
 					free(lst_path[fd]);
 					lst_path[fd] = NULL;
-					fprintf(stderr, "close fd =%u \n", fd);
+					fprintf(stderr, "close fd =%u", fd);
+					 __LOG__(__LOG_ERROR_,"close fd =%u", fd);
 				}
 			}
 
@@ -325,8 +408,9 @@ void watcher(zhandle_t *zzh, int type, int state, const char *path,
             const clientid_t *id = zoo_client_id(zzh);
             if (myid.client_id == 0 || myid.client_id != id->client_id) {
                 myid = *id;
-                fprintf(stderr, "Got a new session id: 0x%llx\n",
+				 __LOG__(__LOG_MSG_,"Got a new session id: 0x%llx",
                         (long long) myid.client_id);
+					
                 if (clientIdFile) {
                     FILE *fh = fopen(clientIdFile, "w");
                     if (!fh) {
@@ -341,18 +425,19 @@ void watcher(zhandle_t *zzh, int type, int state, const char *path,
                 }
             }
         } else if (state == ZOO_AUTH_FAILED_STATE) {
-            fprintf(stderr, "Authentication failure. Shutting down...\n");
+            fprintf(stderr, "Authentication failure. Shutting down...");
             zookeeper_close(zzh);
             //shutdownThisThing=1;
             zh=0;
         } else if (state == ZOO_EXPIRED_SESSION_STATE) {
-            fprintf(stderr, "Session expired. Shutting down...\n");
+            fprintf(stderr, "Session expired. Shutting down...");
             //zookeeper_close(zzh);
            // shutdownThisThing=1;
             zh=0;
         }
     }
 out:
+	
 	EVBASE_RELEASE_LOCK(base,th_base_lock);
 }
 
@@ -366,7 +451,7 @@ static void eventcb(struct bufferevent *bev, short what, void *ctx);
 static void
 readcb(struct bufferevent *bev, void *ctx)
 {
-	printf("readcb\n");
+	__LOG__(__LOG_MSG_,"ctx=%p",ctx);
 	struct evbuffer *src,*dst;
 	size_t len;
 	src = bufferevent_get_input(bev);
@@ -377,7 +462,7 @@ readcb(struct bufferevent *bev, void *ctx)
 	size_t n_read_out = 0;
 	char* line = evbuffer_readln(src,&n_read_out,EVBUFFER_EOL_LF);
 	if(NULL != line && n_read_out > 0){
-		printf("%s\n",line);
+		__LOG__(__LOG_MSG_,"%s",line);
 		//char *errmsg = NULL;
 		//int rc = sqlite3_exec(db,line,callback,bev,&errmsg);
 		//if( rc != SQLITE_OK ){
@@ -394,17 +479,25 @@ readcb(struct bufferevent *bev, void *ctx)
 				rst[rst_idx++] = lst[i];
 			}
 		}
-		int _ridx = rand() % rst_idx;
-		int _len = n_read_out + 100;
-		char *_pbuff =	mm_calloc(1,_len);
-		int _rlen = snprintf(_pbuff,_len,"%s\n",line);
-		assert(_rlen < _len);
-		dst = bufferevent_get_output(rst[_ridx]);
-		int _ret = evbuffer_add(dst,line,_len);
-		printf("_idx=%d _ridx=%d n_read_out=%d _ret=%d\n",_idx,_ridx,n_read_out,_ret);
-		mm_free(line);
-		mm_free(_pbuff);
+		if(rst_idx > 0){
+			int _ridx = rand() % rst_idx;
+			int _len = n_read_out + 100;
+			char *_pbuff =	mm_calloc(1,_len);
+			int _rlen = snprintf(_pbuff,_len,"%s\n",line);
+			assert(_rlen < _len);
+			dst = bufferevent_get_output(rst[_ridx]);
+			int _ret = evbuffer_add(dst,line,_len);
+			__LOG__(__LOG_MSG_,"_idx=%d _ridx=%d n_read_out=%d _ret=%d",_idx,_ridx,n_read_out,_ret);
+			//SSL_renegotiate(bufferevent_openssl_get_ssl(bev));
 
+			mm_free(line);
+			mm_free(_pbuff);
+		}else{
+			mm_free(line);
+		}
+		//evbuffer_add_printf( bufferevent_get_output(bev),"-->%s\n","world");
+		
+	
 
 
 	}
@@ -417,7 +510,7 @@ readcb(struct bufferevent *bev, void *ctx)
 static void
 readcb_r(struct bufferevent *bev, void *ctx)
 {
-	//printf("readcb_r\n");
+	__LOG__(__LOG_MSG_,"ctx=%p",ctx);
 	struct evbuffer *src,*dst;
 	size_t len;
 	int i;
@@ -434,14 +527,11 @@ readcb_r(struct bufferevent *bev, void *ctx)
 			c++;
 		}
 	}
-	printf("c=%d\n",c);
+	__LOG__(__LOG_MSG_,"c=%d",c);
 	//evbuffer_add_buffer(dst, src);
 	evbuffer_drain(src, len);
 	mm_free(buff);
 }
-
-
-
 
 
 
@@ -471,9 +561,9 @@ close_on_finished_writecb(struct bufferevent *bev, void *ctx)
 static void
 eventcb(struct bufferevent *bev, short what, void *ctx)
 {
-	printf("eventcb\n");
+	__LOG__(__LOG_MSG_,"eventcb watch=%d",(int)what);
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
-		printf("eventcb close\n");
+		__LOG__(__LOG_MSG_,"eventcb close watch=%d",(int)what);
 		evutil_socket_t fd = bufferevent_getfd(bev);
 		assert(fd > -1);
 		clst[fd] = NULL;		
@@ -485,9 +575,9 @@ eventcb(struct bufferevent *bev, short what, void *ctx)
 static void
 eventcb_r(struct bufferevent *bev, short what, void *ctx)
 {
-	printf("eventcb_r what=%d\n",(int)what);
+	__LOG__(__LOG_MSG_,"eventcb_r what=%d",(int)what);
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
-		printf("eventcb close\n");
+		__LOG__(__LOG_MSG_,"%s","eventcb close");
 		//evutil_socket_t fd = bufferevent_getfd(bev);
 		//assert(fd > -1);
 		//clst[fd] = NULL;		
@@ -507,6 +597,16 @@ syntax(void)
 	exit(1);
 }
 
+X509 *
+ssl_getcert(void);
+
+EVP_PKEY *
+ssl_getkey(void);
+
+SSL_CTX *
+get_ssl_ctx(void);
+
+
 static void
 accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
     struct sockaddr *a, int slen, void *p)
@@ -514,31 +614,167 @@ accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
 	struct bufferevent *b_in;
 	/* Create two linked bufferevent objects: one to connect, one for the
 	 * new connection */
-	b_in = bufferevent_socket_new(base, fd,
-	    BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
+//	b_in = bufferevent_socket_new(base, fd,
+//	    BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
+
+	init_ssl();
+    SSL *ssl;
+    X509 *cert = ssl_getcert();
+    EVP_PKEY *key = ssl_getkey();
+    ssl = SSL_new(get_ssl_ctx());
+	SSL_use_certificate(ssl, ssl_getcert());
+	SSL_use_PrivateKey(ssl, ssl_getkey());
+
+	
+	
+	b_in = bufferevent_openssl_socket_new(
+            base, fd, ssl, BUFFEREVENT_SSL_ACCEPTING, BEV_OPT_CLOSE_ON_FREE|BEV_OPT_THREADSAFE|BEV_OPT_DEFER_CALLBACKS);	
+	
 	clst[fd] = b_in;
 
 	bufferevent_setcb(b_in, readcb, NULL, eventcb, NULL);
 	bufferevent_enable(b_in, EV_READ|EV_WRITE);
 }
 
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/pem.h>
 
-static void
-signal_cb(evutil_socket_t fd, short event, void *arg)
+
+static const char KEY[] =
+    "-----BEGIN RSA PRIVATE KEY-----\n"
+    "MIIBOgIBAAJBAKibTEzXjj+sqpipePX1lEk5BNFuL/dDBbw8QCXgaJWikOiKHeJq\n"
+    "3FQ0OmCnmpkdsPFE4x3ojYmmdgE2i0dJwq0CAwEAAQJAZ08gpUS+qE1IClps/2gG\n"
+    "AAer6Bc31K2AaiIQvCSQcH440cp062QtWMC3V5sEoWmdLsbAHFH26/9ZHn5zAflp\n"
+    "gQIhANWOx/UYeR8HD0WREU5kcuSzgzNLwUErHLzxP7U6aojpAiEAyh2H35CjN/P7\n"
+    "NhcZ4QYw3PeUWpqgJnaE/4i80BSYkSUCIQDLHFhLYLJZ80HwHTADif/ISn9/Ow6b\n"
+    "p6BWh3DbMar/eQIgBPS6azH5vpp983KXkNv9AL4VZi9ac/b+BeINdzC6GP0CIDmB\n"
+    "U6GFEQTZ3IfuiVabG5pummdC4DNbcdI+WKrSFNmQ\n"
+    "-----END RSA PRIVATE KEY-----\n";
+
+EVP_PKEY *
+ssl_getkey(void)
 {
-	//struct event *signal = arg;
-	//printf("%s: got signal %d\n", __func__, event_get_signal(signal));
-	//zookeeper_close(zh);
-	//exit(0);
+	EVP_PKEY *key;
+	BIO *bio;
 
-	struct event_base *base = arg;
-	struct timeval delay = { 2, 0 };
+	/* new read-only BIO backed by KEY. */
+	bio = BIO_new_mem_buf((char*)KEY, -1);
+	assert(bio);
 
-	printf("Caught an interrupt signal; exiting cleanly in two seconds.\n");
-
-	event_base_loopexit(base, &delay);
-	
+	key = PEM_read_bio_PrivateKey(bio,NULL,NULL,NULL);
+	BIO_free(bio);
+	assert(key);
+	return key;
 }
+
+X509 *
+ssl_getcert(void)
+{
+	/* Dummy code to make a quick-and-dirty valid certificate with
+	   OpenSSL.  Don't copy this code into your own program! It does a
+	   number of things in a stupid and insecure way. */
+	X509 *x509 = NULL;
+	X509_NAME *name = NULL;
+	EVP_PKEY *key = ssl_getkey();
+	int nid;
+	time_t now = time(NULL);
+
+	assert(key);
+
+	x509 = X509_new();
+	assert(x509);
+	assert(0 != X509_set_version(x509, 2));
+	assert(0 != ASN1_INTEGER_set(X509_get_serialNumber(x509),
+		(long)now));
+
+	name = X509_NAME_new();
+	assert(name);
+	nid = OBJ_txt2nid("commonName");
+	assert(NID_undef != nid);
+	assert(0 != X509_NAME_add_entry_by_NID(
+		    name, nid, MBSTRING_ASC, (unsigned char*)"example.com",
+		    -1, -1, 0));
+
+	X509_set_subject_name(x509, name);
+	X509_set_issuer_name(x509, name);
+
+	X509_time_adj(X509_get_notBefore(x509), 0, &now);
+	now += 3600;
+	X509_time_adj(X509_get_notAfter(x509), 0, &now);
+	X509_set_pubkey(x509, key);
+	assert(0 != X509_sign(x509, key, EVP_sha1()));
+
+	return x509;
+}
+
+static int disable_tls_11_and_12 = 0;
+static SSL_CTX *the_ssl_ctx = NULL;
+
+SSL_CTX *
+get_ssl_ctx(void)
+{
+	if (the_ssl_ctx)
+		return the_ssl_ctx;
+	the_ssl_ctx = SSL_CTX_new(SSLv23_method());
+	if (!the_ssl_ctx)
+		return NULL;
+	if (disable_tls_11_and_12) {
+#ifdef SSL_OP_NO_TLSv1_2
+		SSL_CTX_set_options(the_ssl_ctx, SSL_OP_NO_TLSv1_2);
+#endif
+#ifdef SSL_OP_NO_TLSv1_1
+		SSL_CTX_set_options(the_ssl_ctx, SSL_OP_NO_TLSv1_1);
+#endif
+	}
+	return the_ssl_ctx;
+}
+
+void
+init_ssl(void)
+{
+	SSL_library_init();
+	ERR_load_crypto_strings();
+	SSL_load_error_strings();
+	OpenSSL_add_all_algorithms();
+	assert(SSLeay() == OPENSSL_VERSION_NUMBER);
+}
+
+void dumpStat(const struct Stat *stat) {
+    char tctimes[40];
+    char tmtimes[40];
+    time_t tctime;
+    time_t tmtime;
+
+    if (!stat) {
+        fprintf(stderr,"null\n");
+        return;
+    }
+    tctime = stat->ctime/1000;
+    tmtime = stat->mtime/1000;
+       
+    ctime_r(&tmtime, tmtimes);
+    ctime_r(&tctime, tctimes);
+       
+    fprintf(stderr, "\tctime = %s\tczxid=%llx\n"
+    "\tmtime=%s\tmzxid=%llx\n"
+    "\tversion=%x\taversion=%x\n"
+    "\tephemeralOwner = %llx\n",
+     tctimes, stat->czxid, tmtimes,
+    stat->mzxid,
+    (unsigned int)stat->version, (unsigned int)stat->aversion,stat->ephemeralOwner);
+}
+
+
+
+void my_stat_completion(int rc, const struct Stat *stat, const void *data) {
+    fprintf(stderr, "%s: rc = %d Stat:\n", (char*)data, rc);
+    dumpStat(stat);
+    free((void*)data);
+    //if(batchMode)
+    //  shutdownThisThing=1;
+}
+
 
 
 
@@ -571,9 +807,21 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 	}
+
+	evthread_use_pthreads();//this must be called first befor any other libevent funtion
+	//evthread_enable_lock_debugging();
+	assert(1 == EVTHREAD_LOCKING_ENABLED());
+
+	//openssl
+	//init_ssl();
 	
-	//evthread_use_pthreads();//this must be called first befor any other libevent funtion
-	//assert(1 == EVTHREAD_LOCKING_ENABLED());
+	EVTHREAD_ALLOC_LOCK(qlock,EVTHREAD_LOCKTYPE_RECURSIVE);
+	assert(qlock);
+
+	SIMPLEQ_INIT(&watchqueue);
+
+	
+
 
 	base = event_base_new();
 	if (!base) {
@@ -590,29 +838,33 @@ int main(int argc, char **argv)
 	//zookeeper
 	//zoo_set_debug_level(ZOO_LOG_LEVEL_DEBUG);
 	zoo_set_debug_level(ZOO_LOG_LEVEL_WARN);
-	zh = zookeeper_init(zk_addr, watcher, 30000, &myid, 0, 0);
+	zh = zookeeper_init(zk_addr, watcher_1, 30000, &myid, 0, 0);
+
+
+
 	int rc = 0;
 	struct Stat stat;
 	rc = zoo_exists(zh,root_path,0,&stat);
 	if(ZNONODE == rc){
 		rc = zoo_create(zh,root_path,NULL,-1,&ZOO_OPEN_ACL_UNSAFE,0,0,0);
 		if(ZOK != rc){
-			 fprintf(stderr, "Error %d \n", rc);
+			 __LOG__(__LOG_ERROR_,"Error %d ",rc);
 		}
 	}
 	
 	//watch root node
 	rc = zoo_aget_children(zh,root_path,1,strings_completion_t_,NULL);
 	if(ZOK != rc){
-		 fprintf(stderr, "Error %d \n", rc);
+		 __LOG__(__LOG_ERROR_,"Error %d ",rc);		 
 	}
 
 	//exists watch child node.
-	for(i = 0;i<1024;i++){
+	for(i = 0;i<10;i++){
 		char buff[256];
 		int len = snprintf(buff,sizeof(buff),"%s/%d",root_path,i);
 		assert(len < sizeof(buff));
-		rc = zoo_exists(zh,buff,1,&stat);
+		//rc = zoo_exists(zh,buff,1,&stat);
+		zoo_aexists(zh, buff, 1, my_stat_completion, strdup(buff));
 		assert(ZOK == rc || ZNONODE == rc);
 	}
 
@@ -636,7 +888,7 @@ int main(int argc, char **argv)
 	srand(time(NULL)^getpid());
 
 
-	__LOG__(__LOG_MSG_,"main thread tid = 0x%x\n", pthread_self());  
+	__LOG__(__LOG_MSG_,"main thread tid = 0x%x", pthread_self());  
 
 	listener = evconnlistener_new_bind(base, accept_cb, NULL,
 	    LEV_OPT_CLOSE_ON_FREE|LEV_OPT_CLOSE_ON_EXEC|LEV_OPT_REUSEABLE,
@@ -647,26 +899,31 @@ int main(int argc, char **argv)
 		event_base_free(base);
 		return 1;
 	}
-	/* Initalize one event */
-	struct event * signal_int = evsignal_new(base, SIGINT, signal_cb, base);
-	event_add(signal_int, NULL);	
-	
-	event_base_dispatch(base);
 
-	EVBASE_ACQUIRE_LOCK(base,th_base_lock);
-	zookeeper_close(zh);
-	EVBASE_RELEASE_LOCK(base,th_base_lock);
+	while(1){
+		event_base_loop(base,EVLOOP_ONCE | EVLOOP_NONBLOCK);
 
+		if(EVLOCK_TRY_LOCK_(qlock)){
+			if(!SIMPLEQ_EMPTY(&watchqueue)){
+				struct queue_node * pnode = SIMPLEQ_FIRST(&watchqueue);
+				__LOG__(__LOG_MSG_,"path=%s", pnode->val->path); 
+				watcher(pnode->val->zzh,pnode->val->type,pnode->val->status,pnode->val->path,pnode->val->context);
+				mm_free(pnode->val->path);
+				mm_free(pnode->val);
+				mm_free(pnode);
+				
+				SIMPLEQ_REMOVE_HEAD(&watchqueue,pnode,queue_nodes);
+			}
+			EVLOCK_UNLOCK(qlock,0);		
+		}
+	}
 
-
-	
+	//event_base_dispatch(base);
 	evconnlistener_free(listener);
 	event_base_free(base);
 	sqlite3_close(db);
 	sqlite3_shutdown();	
 	libevent_global_shutdown();
 	
-	
-	printf("safe close\n");
 	return 0;
 }

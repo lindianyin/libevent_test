@@ -141,8 +141,12 @@ main(int argc, char **argv)
 	signal_int = evsignal_new(base, SIGINT, signal_cb, base);
 	event_add(signal_int, NULL);
 
-	evfifo = event_new(base, socket, EV_READ|EV_PERSIST, fifo_read,
+	//evfifo = event_new(base, socket, EV_READ|EV_PERSIST, fifo_read,
+    //                       event_self_cbarg());
+	evfifo = event_new(base, 0, EV_READ|EV_PERSIST, fifo_read,
                            event_self_cbarg());
+
+    
 #endif
 
 	/* Add it to the active events, without a timeout */
