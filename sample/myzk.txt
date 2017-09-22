@@ -1,0 +1,43 @@
+exists -w -p/zk_test/1   ##create/delete node
+get -p/zk_test/1          ##change node data
+set -w -p/zk_test/1 -d 192.168.136.90   ##change node data
+ls  -w /zk_test           ##child change 
+
+-----------------------
+
+
+exists -w -p /zk_test/1   ##create/delete node
+
+
+#replay
+success/failed\r\n
+exists\r\n
+[create/delete] /zk_test/1\r\n
+\r\n
+
+---------------------
+
+
+get -p /zk_test/1
+
+#replay
+success/failed\r\n
+get\r\n
+192.168.136.90\r\n
+\r\n
+
+---------------------
+
+
+create -p /zk_test/1 -d 192.168.136.90
+
+#replay
+success/failed\r\n
+create\r\n
+192.168.136.90\r\n
+\r\n
+
+
+
+---------------------
+

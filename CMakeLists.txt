@@ -868,6 +868,7 @@ if (NOT EVENT__DISABLE_SAMPLES)
         websocket
         s_srs
         cli
+        myzk
         )
 
     if (NOT EVENT__DISABLE_OPENSSL AND OPENSSL_LIBRARIES)
@@ -913,7 +914,6 @@ if (NOT EVENT__DISABLE_SAMPLES)
                     hashtable
                     uuid
                     crypto
-                    myzk
                     )
 
         add_dependencies(${SAMPLE} event_extra)
