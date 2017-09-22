@@ -35,11 +35,16 @@
 
 #define MAX_NODE (1024)
 
-struct zknode{
-	char path[256];
-	int  watch[MAX_NODE];
-	int  ctime;
+
+struct zk_data_node{
+	int fd;
 	char data[1024];
+};
+
+
+struct zk_path_node{
+	char path[256];
+	struct zk_data_node*  watchs[MAX_NODE];
 };
 
 
@@ -51,7 +56,7 @@ static sqlite3* db = NULL;
 static lua_State *L = NULL;
 static char* progname;
 
-static struct zknode* nodelist[MAX_NODE];
+static struct zk_path_node* path_nodes[MAX_NODE];
 
 
 static int callback(void *bev, int argc, char **argv, char **azColName){
@@ -80,13 +85,14 @@ readcb(struct bufferevent *bev, void *ctx)
 	char *argv_[20];
 	char *path = NULL;
 	int watch = 0;
-	char *cmd;
+	char *data = NULL;
+	char *cmd = NULL;
 	int i;
 	src = bufferevent_get_input(bev);
 	len = evbuffer_get_length(src);
 	size_t n_read_out;
 	char* line = evbuffer_readln(src,&n_read_out,EVBUFFER_EOL_CRLF);
-
+	printf("-->%s\n",line);
 	
 	if(line && strlen(line)>0){
 		memset(argv_,0,sizeof(argv_));
@@ -97,21 +103,34 @@ readcb(struct bufferevent *bev, void *ctx)
 			p = strtok(NULL," ");
 		}
 
-		for(i = 0;i<argc_;i++){
-			if(0 == strcmp("-w",argv_[i])){
-				watch = 1;
-			}else if(0 == strcmp("-p",argv_[i]) && i < (argc_-1)){
-				path = strdup(argv_[i+1]);	
-			}
-		}
 		cmd = strdup(argv_[0]);
+		if(0 == strcmp("exist",cmd)){
+			for(i = 0;i<argc_;i++){
+				if(0 == strcmp("-w",argv_[i])){
+					watch = 1;
+				}else if(0 == strcmp("-p",argv_[i]) && i < (argc_-1)){
+					path = strdup(argv_[i+1]);	
+				}
+			}
+		}else if(0 == strcmp("create",cmd)){
+			for(i = 0;i<argc_;i++){
+				if(0 == strcmp("-d",argv_[i]) && i < (argc_-1)){
+					data = strdup(argv_[i+1]);
+				}else if(0 == strcmp("-p",argv_[i]) && i < (argc_-1)){
+					path = strdup(argv_[i+1]);	
+				}
+			}
+
+		}
+
+		
 		
 	}
 
-	fprintf(stdout,"cmd=%s path=%s watch=%d\n",cmd,path,watch);
+	fprintf(stdout,"cmd=%s path=%s watch=%d data=%s\n",cmd,path,watch,data);
 	
 
-	printf("-->%s\n",line);
+	
 	free(line);
 	//if(NULL != line){
 	//	printf("%s\n",line);
