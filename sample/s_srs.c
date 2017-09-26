@@ -84,21 +84,17 @@
 	}while(0);
 
 
-
-
-
 static struct event_base *base;
 struct evconnlistener *listener;
 static struct sockaddr_storage listen_on_addr;
 
 static char* listen_addr;
 static char* zk_addr;
+static struct bufferevent * zk_client;
 
 
 #define MAX_NODE (1024)
 static struct bufferevent *lst[MAX_NODE];
-static char* lst_path[MAX_NODE];
-
 
 
 static struct evutil_weakrand_state wr;
@@ -113,339 +109,20 @@ static sqlite3* db = NULL;
 static lua_State* L = NULL;
 
 
-static zhandle_t *zh = NULL;
-static clientid_t myid;
-static const char *clientIdFile = 0;
+static struct bufferevent * 
+connect_to_server(char* ipport,bufferevent_data_cb readcb, bufferevent_event_cb eventcb);
 
-
-static char* root_path = "/zk_test";
-
-static const char* state2String(int state){
-  if (state == 0)
-    return "CLOSED_STATE";
-  if (state == ZOO_CONNECTING_STATE)
-    return "CONNECTING_STATE";
-  if (state == ZOO_ASSOCIATING_STATE)
-    return "ASSOCIATING_STATE";
-  if (state == ZOO_CONNECTED_STATE)
-    return "CONNECTED_STATE";
-  if (state == ZOO_EXPIRED_SESSION_STATE)
-    return "EXPIRED_SESSION_STATE";
-  if (state == ZOO_AUTH_FAILED_STATE)
-    return "AUTH_FAILED_STATE";
-
-  return "INVALID_STATE";
-}
-
-static const char* type2String(int state){
-  if (state == ZOO_CREATED_EVENT)
-    return "CREATED_EVENT";
-  if (state == ZOO_DELETED_EVENT)
-    return "DELETED_EVENT";
-  if (state == ZOO_CHANGED_EVENT)
-    return "CHANGED_EVENT";
-  if (state == ZOO_CHILD_EVENT)
-    return "CHILD_EVENT";
-  if (state == ZOO_SESSION_EVENT)
-    return "SESSION_EVENT";
-  if (state == ZOO_NOTWATCHING_EVENT)
-    return "NOTWATCHING_EVENT";
-
-  return "UNKNOWN_EVENT_TYPE";
-}
 static void
-eventcb_r(struct bufferevent *bev, short what, void *ctx);
-static void
-readcb_r(struct bufferevent *bev, void *ctx);
-
-
-void strings_completion_t_(int rc,
-        const struct String_vector *strings, const void *data){
-
-	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
-	__LOG__(__LOG_MSG_,"strings_completion_t_ strings=%p;data=%p;strings->count=%d;",strings,data,strings->count);
-	
-	int i,len;
-	char buff[256];
-	char buffer[1024];
-	memset(buffer,0,sizeof(buffer));
-	int  buffer_len= sizeof(buffer);
-	struct Stat stat;
-	(void)buffer_len;
-	for(i=0;i<strings->count;i++){
-		__LOG__(__LOG_MSG_,"child_path=%s",(strings->data)[i]);
-		len = snprintf(buff,sizeof(buff),"%s/%s",root_path,(strings->data)[i]);
-		assert(len < sizeof(buff));
-		rc = zoo_get(zh,buff,1,buffer,&buffer_len,&stat);
-		__LOG__(__LOG_MSG_,"buffer=%s",buffer);
-		//rc = zoo_exists(zh,buff,1,&stat);
-		if(ZOK != rc){
-			__LOG__(__LOG_MSG_,"Error rc=%d",rc);
-		}
-
-		//connect to server
-		struct sockaddr_storage ss;
-		int sl = sizeof(ss);
-		if (evutil_parse_sockaddr_port(
-					buffer,(struct sockaddr*)&ss, &sl) <0) {
-			__LOG__(__LOG_ERROR_,"can't parse  %s",buffer);
-			continue;
-		}
-		
-		struct bufferevent * b_out = bufferevent_socket_new(base, -1,
-		    	BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
-		if(-1 == bufferevent_socket_connect(b_out,(struct sockaddr*)&ss,sl)){
-			__LOG__(__LOG_ERROR_,"can't connect %s",buffer);
-			continue;
-		}
-		
-		bufferevent_setcb(b_out, readcb_r, NULL, eventcb_r, NULL);
-		bufferevent_enable(b_out, EV_READ|EV_WRITE);
-		evutil_socket_t fd = bufferevent_getfd(b_out);
-		lst[fd] = b_out;
-		lst_path[fd] = strdup(buffer);
-		__LOG__(__LOG_MSG_,"fd =%u", fd);
-		
-	}
-
-	EVBASE_RELEASE_LOCK(base, th_base_lock);	
-}
-
-void strings_completion_t_1(int rc,
-        const struct String_vector *strings, const void *data){
-    printf("strings_completion_t_ strings=%p;data=%p;strings->count=%d;",strings,data,strings->count);
-	int i,len;
-	char buff[256];
-	char buffer[1024];
-	int  buffer_len= sizeof(buffer);
-	struct Stat stat;
-	(void)buffer_len;
-	for(i=0;i<strings->count;i++){
-		printf("child_path=%s",(strings->data)[i]);
-		len = snprintf(buff,sizeof(buff),"%s/%s",root_path,(strings->data)[i]);
-		assert(len < sizeof(buff));
-		rc = zoo_get(zh,buff,1,buffer,&buffer_len,&stat);
-		//rc = zoo_exists(zh,buff,1,&stat);
-		if(ZOK != rc){
-			fprintf(stderr,"Error rc=%d",rc);
-		}
-	}
-}
-
+readcb(struct bufferevent *bev, void *ctx);
 
 
 static void
 readcb_r(struct bufferevent *bev, void *ctx);
 
+
 static void
 eventcb_r(struct bufferevent *bev, short what, void *ctx);
 
-
-struct watch_st{
-	zhandle_t *zzh;
-	int type;
-	int status;
-	const char* path;
-	void* context;
-};
-
-//list
-struct queue_node{
-	SIMPLEQ_ENTRY(list_node) queue_nodes;
-	struct watch_st *val;
-};
-
-SIMPLEQ_HEAD(queue_head,queue_node);
-
-
-void* qlock = NULL;
-
-struct queue_head watchqueue = LIST_HEAD_INITIALIZER(queue_head);
-
-void my_stat_completion(int rc, const struct Stat *stat, const void *data);
-
-void watcher_1(zhandle_t *zzh, int type, int state, const char *path,
-             void* context)
-{
-	__LOG__(__LOG_MSG_,"watcher_1 %s state = %s", type2String(type), state2String(state));
-	EVLOCK_LOCK(qlock,0);
-
-    if (path && strlen(path) > 0) {
-	 	 __LOG__(__LOG_MSG_,"for path %s", path);
-		struct queue_node * pn = mm_calloc(1,sizeof(*pn));
-		struct watch_st * pw = mm_calloc(1,sizeof(*pw));
-		pw->zzh = zzh;
-		pw->type = type;
-		pw->status = state;
-		pw->context = context;
-		pw->path = strdup(path);
-		pn->val = pw;
-
-		SIMPLEQ_INSERT_TAIL(&watchqueue,pn,queue_nodes);
-		
-		
-
-	}else{
-		__LOG__(__LOG_ERROR_,"watcher_1 %s state = %s", type2String(type), state2String(state));
-	}
-
-	EVLOCK_UNLOCK(qlock,0);
-	return;
-}
-
-
-
-
-
-void watcher(zhandle_t *zzh, int type, int state, const char *path,
-             void* context)
-{
-	//EVLOCK_LOCK(qlock,0);	
-	//struct queue_node * pn = mm_malloc(sizeof(*pn));
-	//struct watch_st * pw = mm_malloc(sizeof(*pw));
-	//pw->zzh = zzh;
-	//pw->type = type;
-	//pw->status = strdup(path);
-	//pw->context = context;
-	//pn->val = pw;
-
-	//SIMPLEQ_INSERT_TAIL(&watchqueue,pn,queue_nodes);
-
-	//struct Stat stat1;
-	//zoo_exists(zh,path,1,&stat1);
-
-	//EVLOCK_UNLOCK(qlock,0);
-	//return;
-
-	zoo_aexists(zh, path, 1, my_stat_completion, strdup(path));
-
-    /* Be careful using zh here rather than zzh - as this may be mt code
-     * the client lib may call the watcher before zookeeper_init returns */
-	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
-	__LOG__(__LOG_MSG_,"Watcher %s state = %s", type2String(type), state2String(state));
-    if (path && strlen(path) > 0) {
-      //fprintf(stderr, " for path %s", path);
-	  __LOG__(__LOG_MSG_,"for path %s", path);
-    }
-    //fprintf(stderr, "\n");
-	//return;
-	//struct Stat stat;
-	//zoo_exists(zh,path,1,&stat);
- 
-	 __LOG__(__LOG_MSG_,"watcher thread tid = %lx", EVTHREAD_GET_ID());
-	
-	if(ZOO_CREATED_EVENT == type 
-		&& ZOO_CONNECTED_STATE == state){
-		//int rc = zoo_aget_children(zh,path,1,strings_completion_t_,NULL);
-		int buffer_len = 1024*1024;
-		char *buffer = malloc(buffer_len);
-		buffer[0] = '\0';
-		struct Stat stat;
-		int rc = zoo_get(zh, path, 1, buffer,   
-						   	&buffer_len, &stat);
-		__LOG__(__LOG_MSG_,"buffer=%s ", buffer);
-
-	
-		//connect to server
-		struct sockaddr_storage ss;
-		int sl = sizeof(ss);
-		if (evutil_parse_sockaddr_port(
-					buffer,(struct sockaddr*)&ss, &sl) <0) {
-			__LOG__(__LOG_ERROR_,"can't parse  %s",buffer);
-			//return;
-			free(buffer);
-			goto out;
-		}
-		
-		struct bufferevent * b_out = bufferevent_socket_new(base, -1,
-		    	BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
-		if(-1 == bufferevent_socket_connect(b_out,(struct sockaddr*)&ss,sl)){
-			__LOG__(__LOG_ERROR_,"can't connect %s",buffer);
-			//return;
-			free(buffer);
-			goto out;
-		}
-		
-		bufferevent_setcb(b_out, readcb_r, NULL, eventcb_r, NULL);
-		bufferevent_enable(b_out, EV_READ|EV_WRITE);
-		evutil_socket_t fd = bufferevent_getfd(b_out);
-		lst[fd] = b_out;
-		lst_path[fd] = strdup(path);
-		__LOG__(__LOG_MSG_,"fd =%u", fd);
-
-		if(ZOK != rc){
-			 __LOG__(__LOG_ERROR_,"Error %d", rc);
-		}
-
-		
-	}else if(ZOO_DELETED_EVENT == type 
-		&& ZOO_CONNECTED_STATE == state){
-		 __LOG__(__LOG_ERROR_,"%s", "delete");
-		int i;
-		for(i = 0;i<1024;i++){
-			if(lst_path[i] && 0 == strcmp(lst_path[i],path)){
-				 __LOG__(__LOG_ERROR_,"lst_path[i]=%s",lst_path[i]);
-				int fd = i;
-				struct bufferevent * ev = lst[fd];
-				if(NULL != ev){
-					bufferevent_free(ev);
-					//evutil_closesocket(fd);
-					lst[fd] = NULL;
-					free(lst_path[fd]);
-					lst_path[fd] = NULL;
-					fprintf(stderr, "close fd =%u", fd);
-					 __LOG__(__LOG_ERROR_,"close fd =%u", fd);
-				}
-			}
-
-		}
-	}
-	//EVBASE_RELEASE_LOCK(base, th_base_lock);
-
-
-    if (type == ZOO_SESSION_EVENT) {
-        if (state == ZOO_CONNECTED_STATE) {
-            const clientid_t *id = zoo_client_id(zzh);
-            if (myid.client_id == 0 || myid.client_id != id->client_id) {
-                myid = *id;
-				 __LOG__(__LOG_MSG_,"Got a new session id: 0x%llx",
-                        (long long) myid.client_id);
-					
-                if (clientIdFile) {
-                    FILE *fh = fopen(clientIdFile, "w");
-                    if (!fh) {
-                        perror(clientIdFile);
-                    } else {
-                        int rc = fwrite(&myid, sizeof(myid), 1, fh);
-                        if (rc != sizeof(myid)) {
-                            perror("writing client id");
-                        }
-                        fclose(fh);
-                    }
-                }
-            }
-        } else if (state == ZOO_AUTH_FAILED_STATE) {
-            fprintf(stderr, "Authentication failure. Shutting down...");
-            zookeeper_close(zzh);
-            //shutdownThisThing=1;
-            zh=0;
-        } else if (state == ZOO_EXPIRED_SESSION_STATE) {
-            fprintf(stderr, "Session expired. Shutting down...");
-            //zookeeper_close(zzh);
-           // shutdownThisThing=1;
-            zh=0;
-        }
-    }
-out:
-	
-	EVBASE_RELEASE_LOCK(base,th_base_lock);
-}
-
-
-
-
-static void drained_writecb(struct bufferevent *bev, void *ctx);
-static void eventcb(struct bufferevent *bev, short what, void *ctx);
 
 
 static void
@@ -534,29 +211,72 @@ readcb_r(struct bufferevent *bev, void *ctx)
 }
 
 
-
 static void
-drained_writecb(struct bufferevent *bev, void *ctx)
-{
-	struct bufferevent *partner = ctx;
+zk_readcb(struct bufferevent *bev, void *ctx){
+	struct evbuffer * zk_input = bufferevent_get_input(bev);
+	char *line = NULL;
+	size_t n_read_out = 0;
+	int i = 0;
+	char* lines[256];
+	int lines_offset = 0;
+	while(line = evbuffer_readln(zk_input, &n_read_out,EVBUFFER_EOL_CRLF)){
+		printf("line=%s n_read_out=%d\n",line,n_read_out);
+		lines[lines_offset++] = line;
+		if(0 == strcmp(line,"") && n_read_out == 0){
+			assert(lines_offset == 4);
+			if(0 == strcmp(lines[1], "get")){
+				//connect to gs
+				struct bufferevent * server_client = connect_to_server(lines[2],readcb_r,eventcb_r);
+				if(server_client){
+					evutil_socket_t fd =  bufferevent_getfd(server_client);
+					lst[fd] = server_client;
+				}else{
+					printf("can't connect to server %s\n",lines[2]);
+				}
 
-	/* We were choking the other side until we drained our outbuf a bit.
-	 * Now it seems drained. */
-	bufferevent_setcb(bev, readcb, NULL, eventcb, partner);
-	bufferevent_setwatermark(bev, EV_WRITE, 0, 0);
-	if (partner)
-		bufferevent_enable(partner, EV_READ);
-}
+			}
 
-static void
-close_on_finished_writecb(struct bufferevent *bev, void *ctx)
-{
-	struct evbuffer *b = bufferevent_get_output(bev);
-
-	if (evbuffer_get_length(b) == 0) {
-		bufferevent_free(bev);
+			for(i = 0;i<lines_offset;i++){
+				free(lines[i]);
+			}
+			lines_offset = 0;
+			break;
+		}
 	}
 }
+
+
+static void
+zk_eventcb(struct bufferevent *bev, short what, void *ctx){
+
+
+}
+
+
+static struct bufferevent * 
+connect_to_server(char* ipport,bufferevent_data_cb readcb, bufferevent_event_cb eventcb){
+	struct sockaddr_storage ss;
+	int sl = sizeof(ss);
+	if (evutil_parse_sockaddr_port(ipport,(struct sockaddr*)&ss, &sl) <0) {
+		__LOG__(__LOG_ERROR_,"can't parse  %s",ipport);
+		return NULL;
+	}
+	
+	struct bufferevent * client = bufferevent_socket_new(base, -1,
+			BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
+	if(-1 == bufferevent_socket_connect(client,(struct sockaddr*)&ss,sl)){
+		__LOG__(__LOG_ERROR_,"can't connect %s",ipport);
+		return NULL;
+	}
+	
+	bufferevent_setcb(client, readcb, NULL, eventcb, NULL);
+	bufferevent_enable(client, EV_READ|EV_WRITE);
+	evutil_socket_t fd = bufferevent_getfd(client);
+	__LOG__(__LOG_DEBUG_,"fd=%d",fd);
+	return client;
+}
+
+
 
 static void
 eventcb(struct bufferevent *bev, short what, void *ctx)
@@ -577,11 +297,10 @@ eventcb_r(struct bufferevent *bev, short what, void *ctx)
 {
 	__LOG__(__LOG_MSG_,"eventcb_r what=%d",(int)what);
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
-		__LOG__(__LOG_MSG_,"%s","eventcb close");
-		//evutil_socket_t fd = bufferevent_getfd(bev);
-		//assert(fd > -1);
-		//clst[fd] = NULL;		
-		//bufferevent_free(bev);
+		evutil_socket_t fd = bufferevent_getfd(bev);
+		__LOG__(__LOG_MSG_,"%s fd=%d","eventcb close",fd);
+		clst[fd] = NULL;		
+		bufferevent_free(bev);
 	}
 }
 
@@ -740,52 +459,12 @@ init_ssl(void)
 	assert(SSLeay() == OPENSSL_VERSION_NUMBER);
 }
 
-void dumpStat(const struct Stat *stat) {
-    char tctimes[40];
-    char tmtimes[40];
-    time_t tctime;
-    time_t tmtime;
-
-    if (!stat) {
-        fprintf(stderr,"null\n");
-        return;
-    }
-    tctime = stat->ctime/1000;
-    tmtime = stat->mtime/1000;
-       
-    ctime_r(&tmtime, tmtimes);
-    ctime_r(&tctime, tctimes);
-       
-    fprintf(stderr, "\tctime = %s\tczxid=%llx\n"
-    "\tmtime=%s\tmzxid=%llx\n"
-    "\tversion=%x\taversion=%x\n"
-    "\tephemeralOwner = %llx\n",
-     tctimes, stat->czxid, tmtimes,
-    stat->mzxid,
-    (unsigned int)stat->version, (unsigned int)stat->aversion,stat->ephemeralOwner);
-}
-
-
-
-void my_stat_completion(int rc, const struct Stat *stat, const void *data) {
-    fprintf(stderr, "%s: rc = %d Stat:\n", (char*)data, rc);
-    dumpStat(stat);
-    free((void*)data);
-    //if(batchMode)
-    //  shutdownThisThing=1;
-}
-
-
-
-
-
 int main(int argc, char **argv)
 {
 	int i;
 	int socklen;
 	int ret;
-
-	
+	int len;
 
 	if (argc < 2)
 		syntax();
@@ -808,21 +487,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	evthread_use_pthreads();//this must be called first befor any other libevent funtion
-	//evthread_enable_lock_debugging();
-	assert(1 == EVTHREAD_LOCKING_ENABLED());
-
-	//openssl
-	//init_ssl();
-	
-	EVTHREAD_ALLOC_LOCK(qlock,EVTHREAD_LOCKTYPE_RECURSIVE);
-	assert(qlock);
-
-	SIMPLEQ_INIT(&watchqueue);
-
-	
-
-
 	base = event_base_new();
 	if (!base) {
 		__LOG__(__LOG_ERROR_,"%s","event_base_new()");
@@ -835,38 +499,19 @@ int main(int argc, char **argv)
 	luaL_openlibs(L);
 
 
-	//zookeeper
-	//zoo_set_debug_level(ZOO_LOG_LEVEL_DEBUG);
-	zoo_set_debug_level(ZOO_LOG_LEVEL_WARN);
-	zh = zookeeper_init(zk_addr, watcher_1, 30000, &myid, 0, 0);
-
-
-
-	int rc = 0;
-	struct Stat stat;
-	rc = zoo_exists(zh,root_path,0,&stat);
-	if(ZNONODE == rc){
-		rc = zoo_create(zh,root_path,NULL,-1,&ZOO_OPEN_ACL_UNSAFE,0,0,0);
-		if(ZOK != rc){
-			 __LOG__(__LOG_ERROR_,"Error %d ",rc);
-		}
-	}
+	//connect to myzk
+	zk_client = connect_to_server(zk_addr,zk_readcb,zk_eventcb);
+	assert(zk_client);
 	
-	//watch root node
-	rc = zoo_aget_children(zh,root_path,1,strings_completion_t_,NULL);
-	if(ZOK != rc){
-		 __LOG__(__LOG_ERROR_,"Error %d ",rc);		 
-	}
 
-	//exists watch child node.
-	for(i = 0;i<10;i++){
-		char buff[256];
-		int len = snprintf(buff,sizeof(buff),"%s/%d",root_path,i);
-		assert(len < sizeof(buff));
-		//rc = zoo_exists(zh,buff,1,&stat);
-		zoo_aexists(zh, buff, 1, my_stat_completion, strdup(buff));
-		assert(ZOK == rc || ZNONODE == rc);
-	}
+	struct evbuffer * zk_output = bufferevent_get_output(zk_client);
+	char buff[1024];
+	len = snprintf(buff,sizeof(buff),"get\r\n");
+	assert(len < sizeof(buff));
+	evbuffer_add(zk_output,buff,len+1);
+		
+	
+
 
 
 	sqlite3_initialize();
@@ -900,25 +545,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	while(1){
-		event_base_loop(base,EVLOOP_ONCE | EVLOOP_NONBLOCK);
 
-		if(EVLOCK_TRY_LOCK_(qlock)){
-			if(!SIMPLEQ_EMPTY(&watchqueue)){
-				struct queue_node * pnode = SIMPLEQ_FIRST(&watchqueue);
-				__LOG__(__LOG_MSG_,"path=%s", pnode->val->path); 
-				watcher(pnode->val->zzh,pnode->val->type,pnode->val->status,pnode->val->path,pnode->val->context);
-				mm_free(pnode->val->path);
-				mm_free(pnode->val);
-				mm_free(pnode);
-				
-				SIMPLEQ_REMOVE_HEAD(&watchqueue,pnode,queue_nodes);
-			}
-			EVLOCK_UNLOCK(qlock,0);		
-		}
-	}
-
-	//event_base_dispatch(base);
+	event_base_dispatch(base);
 	evconnlistener_free(listener);
 	event_base_free(base);
 	sqlite3_close(db);

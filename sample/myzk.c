@@ -36,18 +36,6 @@
 #define MAX_NODE (1024)
 
 
-struct zk_data_node{
-	int fd;
-	char data[1024];
-};
-
-
-struct zk_path_node{
-	char path[256];
-	struct zk_data_node*  watchs[MAX_NODE];
-};
-
-
 
 static struct event_base *base;
 static struct sockaddr_storage listen_on_addr;
@@ -56,7 +44,8 @@ static sqlite3* db = NULL;
 static lua_State *L = NULL;
 static char* progname;
 
-static struct zk_path_node* path_nodes[MAX_NODE];
+static struct bufferevent * connected_fds[MAX_NODE];
+static char* connected_datas[MAX_NODE];
 
 
 static int callback(void *bev, int argc, char **argv, char **azColName){
@@ -77,22 +66,25 @@ static int callback(void *bev, int argc, char **argv, char **azColName){
 static void
 readcb(struct bufferevent *bev, void *ctx)
 {
-	struct evbuffer *src;
-	size_t len;
-	int c;
-	char *p;
+	struct evbuffer *src = NULL;
+	struct evbuffer *des = NULL;
+	size_t len = 0;
+	int c = 0;
+	char *p = NULL;
 	int argc_ = 0;
 	char *argv_[20];
 	char *path = NULL;
 	int watch = 0;
 	char *data = NULL;
 	char *cmd = NULL;
-	int i;
+	int i = 0;
+	evutil_socket_t fd = bufferevent_getfd(bev);
 	src = bufferevent_get_input(bev);
+	des = bufferevent_get_output(bev);
 	len = evbuffer_get_length(src);
 	size_t n_read_out;
 	char* line = evbuffer_readln(src,&n_read_out,EVBUFFER_EOL_CRLF);
-	printf("-->%s\n",line);
+	printf("-->%s fd=%d n_read_out=%d\n",line,fd,n_read_out);
 	
 	if(line && strlen(line)>0){
 		memset(argv_,0,sizeof(argv_));
@@ -104,7 +96,7 @@ readcb(struct bufferevent *bev, void *ctx)
 		}
 
 		cmd = strdup(argv_[0]);
-		if(0 == strcmp("exist",cmd)){
+		if(0 == strncmp("exist",cmd,5)){
 			for(i = 0;i<argc_;i++){
 				if(0 == strcmp("-w",argv_[i])){
 					watch = 1;
@@ -112,7 +104,7 @@ readcb(struct bufferevent *bev, void *ctx)
 					path = strdup(argv_[i+1]);	
 				}
 			}
-		}else if(0 == strcmp("create",cmd)){
+		}else if(0 == strncmp("create",cmd,6)){
 			for(i = 0;i<argc_;i++){
 				if(0 == strcmp("-d",argv_[i]) && i < (argc_-1)){
 					data = strdup(argv_[i+1]);
@@ -121,6 +113,46 @@ readcb(struct bufferevent *bev, void *ctx)
 				}
 			}
 
+			connected_datas[fd] = strdup(data);
+
+			char buff[1024];
+			len = snprintf(buff,sizeof(buff),"success\r\ncreate\r\n%s\r\n\r\n",data);
+			assert(len < sizeof(buff));
+
+			for(i = 0;i < MAX_NODE; i++){
+				if(connected_fds[i]){
+					evbuffer_add(bufferevent_get_output(connected_fds[i]),buff,len+1);
+				}
+			}
+
+		}else if(0 == strncmp("get",cmd,3)){
+			char buff[1024];
+			for(i = 0;i<MAX_NODE;i++){
+				//must have connectinfo and have connected data (because of srs don't have connected_data)
+				if(connected_fds[i] && connected_datas[i]){
+					len = snprintf(buff,sizeof(buff),"success\r\nget\r\n%s\r\n\r\n",connected_datas[i]);
+					printf("buff=%s\n",buff);
+					assert(len < sizeof(buff));
+					evbuffer_add(des,buff,len+1); 
+				}
+			}
+		}else if(0 == strncmp("delete",cmd,6)){
+			char buff[1024];
+			len = snprintf(buff,sizeof(buff),"success\r\ndelete\r\n%s\r\n\r\n",connected_datas[fd]);
+			assert(len < sizeof(buff));		
+			for(i = 0 ;i< MAX_NODE;i++){
+				if(connected_fds[i]){
+					evbuffer_add(bufferevent_get_output(connected_fds[i]),buff,len+1); 
+				}
+			}
+
+			connected_fds[fd] = NULL;
+			if(connected_datas[fd]){
+				free(connected_datas[fd]);
+				connected_datas[fd] = NULL;
+			}
+			bufferevent_free(bev);
+			
 		}
 
 		
@@ -128,9 +160,15 @@ readcb(struct bufferevent *bev, void *ctx)
 	}
 
 	fprintf(stdout,"cmd=%s path=%s watch=%d data=%s\n",cmd,path,watch,data);
-	
 
 	
+
+	for(i = 0;i<argc_;i++){
+		free(argv_[i]);
+	}
+	free(path);
+	free(data);
+	free(cmd);
 	free(line);
 	//if(NULL != line){
 	//	printf("%s\n",line);
@@ -149,11 +187,31 @@ readcb(struct bufferevent *bev, void *ctx)
 
 
 
+
 static void
 eventcb(struct bufferevent *bev, short what, void *ctx)
 {
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
 		printf("eventcb close\n");
+		evutil_socket_t fd = bufferevent_getfd(bev);
+
+		char buff[1024];
+		int i;
+		int len;
+		len = snprintf(buff,sizeof(buff),"success\r\ndelete\r\n%s\r\n\r\n",connected_datas[fd]);
+		printf("buff=%s\n",buff);
+		assert(len < sizeof(buff));		
+		for(i = 0 ;i< MAX_NODE;i++){
+			if(connected_fds[i]){
+				evbuffer_add(bufferevent_get_output(connected_fds[i]),buff,len+1); 
+			}
+		}
+
+		connected_fds[fd] = NULL;
+		if(connected_datas[fd]){
+			free(connected_datas[fd]);
+			connected_datas[fd] = NULL;
+		}
 		bufferevent_free(bev);
 	}
 }
@@ -178,6 +236,8 @@ accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
 	b_in = bufferevent_socket_new(base, fd,
 	    BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
 
+	connected_fds[fd] = b_in;
+	
 	bufferevent_setcb(b_in, readcb, NULL, eventcb, NULL);
 	bufferevent_enable(b_in, EV_READ|EV_WRITE);
 }
