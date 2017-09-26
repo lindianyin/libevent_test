@@ -103,7 +103,7 @@ option(EVENT__BUILD_SHARED_LIBRARIES
     "Define if libevent should be built with shared libraries instead of archives" OFF)
 
 option(EVENT__DISABLE_DEBUG_MODE
-    "Define if libevent should build without support for a debug mode" OFF)
+    "Define if libevent should build without support for a debug mode" ON)
 
 option(EVENT__ENABLE_VERBOSE_DEBUG
     "Enables verbose debugging" OFF)
@@ -869,6 +869,7 @@ if (NOT EVENT__DISABLE_SAMPLES)
         s_srs
         cli
         myzk
+        myecho
         )
 
     if (NOT EVENT__DISABLE_OPENSSL AND OPENSSL_LIBRARIES)

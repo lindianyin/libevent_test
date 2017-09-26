@@ -137,17 +137,9 @@ readcb(struct bufferevent *bev, void *ctx)
 	evbuffer_copyout(src,buff,len);
 	
 	size_t n_read_out = 0;
-	char* line = evbuffer_readln(src,&n_read_out,EVBUFFER_EOL_LF);
+	char* line = evbuffer_readln(src,&n_read_out,EVBUFFER_EOL_ANY);
 	if(NULL != line && n_read_out > 0){
-		__LOG__(__LOG_MSG_,"%s",line);
-		//char *errmsg = NULL;
-		//int rc = sqlite3_exec(db,line,callback,bev,&errmsg);
-		//if( rc != SQLITE_OK ){
-		 //  fprintf(stderr, "SQL error: %s\n", errmsg);
-		//   sqlite3_free(errmsg);
-		//}
-		//ev_int32_t _idx = evutil_weakrand_range_(&wr,1);
-		ev_int32_t _idx = rand() % MAX_NODE;
+		__LOG__(__LOG_MSG_,"line=%s n_read_out=%d",line,n_read_out);
 		struct bufferevent *rst[MAX_NODE];
 		int rst_idx = 0;
 		int i;
@@ -156,31 +148,27 @@ readcb(struct bufferevent *bev, void *ctx)
 				rst[rst_idx++] = lst[i];
 			}
 		}
+		__LOG__(__LOG_MSG_,"rst_idx=%d",rst_idx);
 		if(rst_idx > 0){
 			int _ridx = rand() % rst_idx;
+			dst = bufferevent_get_output(rst[_ridx]);
+			assert(dst);
 			int _len = n_read_out + 100;
 			char *_pbuff =	mm_calloc(1,_len);
-			int _rlen = snprintf(_pbuff,_len,"%s\n",line);
+			int _rlen = snprintf(_pbuff,_len,"%s\r\n",line);
 			assert(_rlen < _len);
-			dst = bufferevent_get_output(rst[_ridx]);
-			int _ret = evbuffer_add(dst,line,_len);
-			__LOG__(__LOG_MSG_,"_idx=%d _ridx=%d n_read_out=%d _ret=%d",_idx,_ridx,n_read_out,_ret);
-			//SSL_renegotiate(bufferevent_openssl_get_ssl(bev));
-
+				
+			int _ret = evbuffer_add(dst,_pbuff,_rlen+1);
+			__LOG__(__LOG_MSG_,"_ridx=%d n_read_out=%d _ret=%d",_ridx,n_read_out,_ret);
+			
 			mm_free(line);
 			mm_free(_pbuff);
 		}else{
 			mm_free(line);
 		}
-		//evbuffer_add_printf( bufferevent_get_output(bev),"-->%s\n","world");
-		
-	
-
 
 	}
-	//dst = bufferevent_get_output(bev);
-	//evbuffer_add_buffer(dst, src);
-	//evbuffer_drain(src, len);
+
 }
 
 
@@ -220,15 +208,17 @@ zk_readcb(struct bufferevent *bev, void *ctx){
 	char* lines[256];
 	int lines_offset = 0;
 	while(line = evbuffer_readln(zk_input, &n_read_out,EVBUFFER_EOL_CRLF)){
-		printf("line=%s n_read_out=%d\n",line,n_read_out);
+		printf("zk_readcb line=%s n_read_out=%d\n",line,n_read_out);
 		lines[lines_offset++] = line;
 		if(0 == strcmp(line,"") && n_read_out == 0){
 			assert(lines_offset == 4);
-			if(0 == strcmp(lines[1], "get")){
+			if(0 == strncmp(lines[1], "get",3)
+				|| 0 == strncmp(lines[1],"create",6)){
 				//connect to gs
 				struct bufferevent * server_client = connect_to_server(lines[2],readcb_r,eventcb_r);
 				if(server_client){
 					evutil_socket_t fd =  bufferevent_getfd(server_client);
+					printf("connect to server fd=%d\n",fd);
 					lst[fd] = server_client;
 				}else{
 					printf("can't connect to server %s\n",lines[2]);
@@ -248,7 +238,12 @@ zk_readcb(struct bufferevent *bev, void *ctx){
 
 static void
 zk_eventcb(struct bufferevent *bev, short what, void *ctx){
-
+	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
+		evutil_socket_t fd = bufferevent_getfd(bev);
+		printf("eventcb close fd=%d\n",fd);
+		lst[fd] = NULL;
+		bufferevent_free(bev);
+	}	
 
 }
 
@@ -283,8 +278,8 @@ eventcb(struct bufferevent *bev, short what, void *ctx)
 {
 	__LOG__(__LOG_MSG_,"eventcb watch=%d",(int)what);
 	if (what & (BEV_EVENT_EOF|BEV_EVENT_ERROR)) {
-		__LOG__(__LOG_MSG_,"eventcb close watch=%d",(int)what);
 		evutil_socket_t fd = bufferevent_getfd(bev);
+		__LOG__(__LOG_MSG_,"eventcb close what=%d fd=%d",(int)what,fd);
 		assert(fd > -1);
 		clst[fd] = NULL;		
 		bufferevent_free(bev);	
@@ -331,11 +326,6 @@ accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
     struct sockaddr *a, int slen, void *p)
 {
 	struct bufferevent *b_in;
-	/* Create two linked bufferevent objects: one to connect, one for the
-	 * new connection */
-//	b_in = bufferevent_socket_new(base, fd,
-//	    BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
-
 	init_ssl();
     SSL *ssl;
     X509 *cert = ssl_getcert();
@@ -343,11 +333,9 @@ accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
     ssl = SSL_new(get_ssl_ctx());
 	SSL_use_certificate(ssl, ssl_getcert());
 	SSL_use_PrivateKey(ssl, ssl_getkey());
-
-	
-	
+		
 	b_in = bufferevent_openssl_socket_new(
-            base, fd, ssl, BUFFEREVENT_SSL_ACCEPTING, BEV_OPT_CLOSE_ON_FREE|BEV_OPT_THREADSAFE|BEV_OPT_DEFER_CALLBACKS);	
+            base, fd, ssl, BUFFEREVENT_SSL_ACCEPTING, BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);	
 	
 	clst[fd] = b_in;
 
@@ -459,12 +447,32 @@ init_ssl(void)
 	assert(SSLeay() == OPENSSL_VERSION_NUMBER);
 }
 
+
+void 
+evtimercb(evutil_socket_t fd, short what, void * arg){
+	printf("evtimercb\n");
+	//connect to myzk
+	zk_client = connect_to_server(zk_addr,zk_readcb,zk_eventcb);
+	assert(zk_client);
+
+	struct evbuffer * zk_output = bufferevent_get_output(zk_client);
+	char buff[1024];
+	int len = snprintf(buff,sizeof(buff),"get\r\n");
+	assert(len < sizeof(buff));
+	evbuffer_add(zk_output,buff,len+1);
+
+}
+
+
+
+
 int main(int argc, char **argv)
 {
 	int i;
 	int socklen;
 	int ret;
 	int len;
+	struct bufferevent * timer_event;
 
 	if (argc < 2)
 		syntax();
@@ -487,6 +495,9 @@ int main(int argc, char **argv)
 		}
 	}
 
+	event_enable_debug_mode();
+
+
 	base = event_base_new();
 	if (!base) {
 		__LOG__(__LOG_ERROR_,"%s","event_base_new()");
@@ -498,22 +509,7 @@ int main(int argc, char **argv)
 	L = lua_open();
 	luaL_openlibs(L);
 
-
-	//connect to myzk
-	zk_client = connect_to_server(zk_addr,zk_readcb,zk_eventcb);
-	assert(zk_client);
-	
-
-	struct evbuffer * zk_output = bufferevent_get_output(zk_client);
-	char buff[1024];
-	len = snprintf(buff,sizeof(buff),"get\r\n");
-	assert(len < sizeof(buff));
-	evbuffer_add(zk_output,buff,len+1);
 		
-	
-
-
-
 	sqlite3_initialize();
 
 	__LOG__(__LOG_DEBUG_,"%s","sqlite3_initialize");
@@ -525,7 +521,7 @@ int main(int argc, char **argv)
 	socklen = sizeof(listen_on_addr);
 	if (evutil_parse_sockaddr_port(
 			listen_addr,(struct sockaddr*)&listen_on_addr, &socklen) <0) {
-		return 0;
+		return 1;
 	}
 	
 	
@@ -544,6 +540,15 @@ int main(int argc, char **argv)
 		event_base_free(base);
 		return 1;
 	}
+
+
+	timer_event = evtimer_new(base, evtimercb, NULL);
+	struct timeval tv = {5,0};
+	evtimer_add(timer_event, &tv);
+
+
+
+
 
 
 	event_base_dispatch(base);
