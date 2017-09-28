@@ -67,12 +67,15 @@
 enum command{
 	c2s_login = 100,
 	s2c_login,
+	c2s_enter_table,
+	s2c_enter_table,
 	
 };
 
 
 enum error_code{
-	ec_success,
+	ec_success = 0,
+	ec_full_postion = -1,
 };
 
 struct user{
@@ -101,20 +104,29 @@ enum player_status{
 
 };
 
+enum player_type{
+	pt_normal,
+	pt_system,
+};
+
+
 struct player{
-	struct conn_client* conn_clt;
+	struct user* usr;
 	enum player_status ps;
+	enum player_type pt;
 };
 
 enum table_status{
-	ts_ready,
-	ts_beting,
+	ts_betting,
+	ts_turning,
+	ts_balancing,
 };
 
-
+#define MAX_POSTION (256)
+#define BANKER_POSTION (0)
 struct table{
-	struct player* postion[256];
-	struct player* watch_postion[256];
+	struct player* play_postion[MAX_POSTION];
+	enum table_status ts;
 };
 
 
@@ -138,6 +150,12 @@ static lua_State *L = NULL;
 
 static struct conn_client* conn_clients[MAX_CLIENT];
 
+#define MAX_TABLE (10)
+static struct table* table;
+
+#define FRAME (60)
+
+struct timeval tv = {0,1e6/FRAME};
 
 
 //declare
@@ -184,6 +202,17 @@ int process_send(struct bufferevent *bev,char *buff,int len);
 int send_param(struct bufferevent *bev,int cmd,cJSON* param,int ec);
 
 
+void main_tick(evutil_socket_t fd, short what, void * arg);
+
+void init_table();
+
+
+int process_enter_table(struct conn_client * conn_clt,int cmd,cJSON *param);
+
+
+
+
+
 
 int
 main(int argc, char **argv)
@@ -192,6 +221,7 @@ main(int argc, char **argv)
 	int socklen;
 	int ret;
 	int c;
+	struct event * timer;
 	setbuf(stdout,NULL);
 	while(-1 != (c = getopt(argc,argv,"l:"))){
 		switch(c){
@@ -227,7 +257,8 @@ main(int argc, char **argv)
 	testjson();
 
 
-
+	//game init
+	init_table();
 	
 	
 	memset(&listen_on_addr, 0, sizeof(listen_on_addr));
@@ -256,7 +287,18 @@ main(int argc, char **argv)
 	/* Initalize one event */
 	struct event * signal_int = evsignal_new(base, SIGINT, signal_cb, event_self_cbarg());
 	event_add(signal_int, NULL);
-	
+
+
+	//timer tick
+	timer = evtimer_new(base, main_tick, NULL);
+	evtimer_add(timer, &tv);
+
+
+
+
+
+
+
 	event_base_dispatch(base);
 	evconnlistener_free(listener);
 	event_base_free(base);
@@ -930,23 +972,36 @@ int process_message(struct bufferevent *bev,char *msg,int len){
 	int ret = parse_request(msg+8,&cmd,&param);
 	if(!ret){
 		fprintf(stderr,"can't parse len %d msg %s\n",len,msg);
+		cJSON_Delete(param);
 		return 0;
 	}
 	if(c2s_login == cmd
 		&& conn_clt->us == us_logined){
 		fprintf(stderr,"you have logined\n");
+		cJSON_Delete(param);
 		return 0;
 	}
+	if(c2s_login != cmd
+		&& conn_clt->us != us_logined){
+		fprintf(stderr,"you must login firstly\n");
+		cJSON_Delete(param);
+		return 0;
+	}
+
+
+	
 
 	switch(cmd){
 		case c2s_login:
 			process_login(bev,cmd,param);
 			break;
-		
+		case c2s_enter_table:
+			process_enter_table(conn_clt,cmd,param);
+			break;		
 		default:
 			fprintf(stderr,"invalid cmd %d\n",cmd);
 	}
-
+	cJSON_Delete(param);
 	
 	return 1;
 }
@@ -977,6 +1032,61 @@ int send_param(struct bufferevent *bev,int cmd,cJSON* param,int ec){
 	free(json);
 	free(buff);
 	cJSON_Delete(root);
+	return 1;
+}
+
+
+void main_tick(evutil_socket_t fd, short what, void * arg){
+	//timer tick
+	struct event* timer = evtimer_new(base, main_tick, NULL);
+	evtimer_add(timer, &tv);
+
+
+	
+}
+
+void init_table(){
+	table = calloc(sizeof(*table),1);
+}
+
+
+
+int process_enter_table(struct conn_client * conn_clt,int cmd,cJSON *param){
+	int i;
+	int flag = 0;
+	for(i = BANKER_POSTION+1;i<MAX_POSTION;i++){
+		struct player* p = table->play_postion[i];
+		if(p && p->usr->id == conn_clt->usr->id){
+			flag = 1;
+			break;
+		}
+	}
+	if(!flag){
+		for(i = BANKER_POSTION+1;i<MAX_POSTION;i++){
+			if(!table->play_postion[i]){
+				struct player* p = calloc(sizeof(*p),1);
+				struct user* usr = calloc(sizeof(*usr),1);
+				memcpy(usr,conn_clt->usr,sizeof(*usr));//we must copy memory ,so we don't need the conn_client life cycle.
+				p->usr = usr;
+				p->ps = player_ready;
+				p->pt = pt_normal;
+				table->play_postion[i] = p;
+				break;
+			}
+		}
+	}
+
+	int ec = ec_success;
+	if(i >= MAX_POSTION){
+		ec = ec_full_postion;
+	}
+	
+	cJSON * resp_param = cJSON_CreateArray();
+	cJSON * ret = NULL;
+	cJSON_AddItemToArray(resp_param,ret = cJSON_CreateNumber(i));
+
+	send_param(conn_clt->bev,s2c_enter_table,resp_param,ec);
+	cJSON_Delete(resp_param);
 	return 1;
 }
 
