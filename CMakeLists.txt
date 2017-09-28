@@ -870,6 +870,7 @@ if (NOT EVENT__DISABLE_SAMPLES)
         cli
         myzk
         myecho
+        sixteen
         )
 
     if (NOT EVENT__DISABLE_OPENSSL AND OPENSSL_LIBRARIES)
@@ -896,11 +897,13 @@ if (NOT EVENT__DISABLE_SAMPLES)
     link_directories("/home/lindianyin/sqlite-amalgamation-3200000")
     link_directories("/home/lindianyin/lua-5.1.4/src")
     link_directories("/home/lindianyin/zookeeper-3.4.6/src/c/.libs")
+    link_directories("/home/lindianyin/cJSON/build")
     include_directories("/home/lindianyin/sqlite-amalgamation-3200000") 
     include_directories("/home/lindianyin/libevent") 
     include_directories("/home/lindianyin/lua-5.1.4/src") 
     include_directories("/home/lindianyin/zookeeper-3.4.6/src/c/include") 
     include_directories("/home/lindianyin/zookeeper-3.4.6/src/c/generated") 
+    include_directories("/home/lindianyin/cJSON") 
     foreach(SAMPLE ${SAMPLES})
         add_executable(${SAMPLE}
                     sample/${SAMPLE}.c)
@@ -915,6 +918,7 @@ if (NOT EVENT__DISABLE_SAMPLES)
                     hashtable
                     uuid
                     crypto
+                    cjson
                     )
 
         add_dependencies(${SAMPLE} event_extra)
