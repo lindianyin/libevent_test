@@ -1,0 +1,118 @@
+#号开头表示注释
+
+enum command{
+	c2s_login = 100,
+	s2c_login,
+	c2s_enter_table,
+	s2c_enter_table,
+	c2s_leave_table,
+	s2c_leave_table,
+	c2s_bet,
+	s2c_bet,
+	s2c_cards,
+	s2c_tally_result,
+	s2c_status_change,
+	s2c_update_money,
+	s2c_broadcast_player,
+};
+
+一些常量，现在计时单位为帧，方便以后调整
+#define FRAME (60)
+
+struct timeval tv = {0,1e6/FRAME};
+
+static int durations[3] = {10*FRAME,15*FRAME,5*FRAME}; #每个阶段持续的时间
+
+#define MAX_BET (1000000)
+
+
+
+1.login
+
+#request
+------->{"cmd":100,"param":["username","passwd"]}
+
+
+#response
+<-------{
+	"cmd":	101,
+	"param":	[{
+			"id":	1,
+			"username":	"username",
+			"nickname":	"nickname",
+			"head":	"head",
+			"money":	1000
+		}],
+	"ec":	0
+}
+
+
+
+2.桌子状态机
++------------+                           +------------+
+|            |                           |            |
+| betting    | +-----------------------> |  turning   |
+|            |                           |            |
++----+-------+                           +------+-----+
+     ^                                          |
+     |                                          |
+     |                                          |
+     |                                          |
+     |                                          |
+     |                                          |
+     |                                          |
+     |                                          |
+     |                                          |
+     |          +--------------+                |
+     |          |              |                |
+     +----------+ balancing    | <--------------+
+                |              |
+                +--------------+
+
+
+
+3.进入桌子
+#request
+------->{"cmd":102,"param":[]}
+
+#response
+<-------{
+	"cmd":	103,
+	"param":	[1],   #table postion
+	"ec":	0
+}
+
+4.离开桌子
+#request
+------->{"cmd":104,"param":[]}
+
+
+#response
+<-------{
+	"cmd":	105,
+	"param":	[1],   #table postion
+	"ec":	0
+}
+
+6.下注
+#request
+------->{"cmd":106,"param":[1,10000]}  #0位置对应位置(中发白，从1开始) 1位置对应下注的筹码
+
+
+#response
+<-------{
+	"cmd":	107,
+	"param":	[],
+	"ec":	0
+}
+
+
+
+
+
+
+
+
+
+
+

@@ -74,12 +74,17 @@ enum command{
 	c2s_bet,
 	s2c_bet,
 	s2c_cards,
+	s2c_tally_result,
+	s2c_status_change,
+	s2c_update_money,
+	s2c_broadcast_player,
 };
 
 
 enum error_code{
 	ec_success = 0,
 	ec_full_postion = -1,
+	ec_not_enouth = -2,
 };
 
 struct user{
@@ -131,6 +136,13 @@ enum table_status{
 struct cards{
 	int card[2];
 };
+
+enum player_action{
+	pa_add,
+	pa_delete,
+	pa_update,
+};
+
 
 
 #define MAX_POSTION (256)
@@ -242,6 +254,9 @@ void balancing_to_betting();
 
 void shuffle_cards();
 
+int calc_cards_score(int* cards);
+int tally(int id,int money,enum tally_result *tr,int *now_money);
+void status_change(enum table_status ts_from,enum table_status ts_to);
 
 
 int
@@ -855,7 +870,7 @@ void testsqlite(){
 				char* nickname = sqlite3_column_text( stmt, 3);
 				char* head = sqlite3_column_text( stmt, 4); 
 				int   money = sqlite3_column_int( stmt, 5);
-				fprintf(stdout,"id = %lld username=%s passwd=%s nickname=%s head=%s money=%d\n",id,username,passwd,nickname,head,money);
+				fprintf(stdout,"id = %lld username=%s passwd=%s nickname=%s head=%s money=%d\n",(long long)id,username,passwd,nickname,head,money);
    			 }
      	}else{
      		fprintf(stderr,"prepare_v2 error\n"); 
@@ -981,7 +996,7 @@ int process_login(struct bufferevent *bev,int cmd,cJSON *param){
 
 			
 			
-			fprintf(stdout,"id = %lld username=%s passwd=%s nickname=%s head=%s money=%d\n",id,username,passwd,nickname,head,money);		
+			fprintf(stdout,"id = %lld username=%s passwd=%s nickname=%s head=%s money=%d\n",(long long)id,username,passwd,nickname,head,money);		
 
 	}else{
 		fprintf(stderr,"sqlite3_setp error ret=%d\n",ret);
@@ -1071,6 +1086,14 @@ int send_param(struct bufferevent *bev,int cmd,cJSON* param,int ec){
 	return 1;
 }
 
+void update_money(struct conn_client* conn_clt,int money){
+	cJSON* resp_param = cJSON_CreateArray();
+	cJSON* ret = NULL;
+	cJSON_AddItemToArray(resp_param,ret = cJSON_CreateNumber(money));
+	conn_clt->usr->money = money;
+	send_param(conn_clt->bev,s2c_update_money,resp_param,ec_success);
+}
+
 
 void main_tick(evutil_socket_t fd, short what, void * arg){
 	//timer tick
@@ -1085,18 +1108,21 @@ void main_tick(evutil_socket_t fd, short what, void * arg){
 		table->ts = ts_turning;
 		table->duration = durations[table->ts];
 		betting_to_turning();
+		status_change(ts_betting,ts_turning);
 	}else if(table->ts == ts_turning
 		&& table->duration == 0){
 		fprintf(stdout,"from turning to balancing\n");
 		table->ts = ts_balancing;
 		table->duration = durations[table->ts];
 		turing_to_balancing();
+		status_change(ts_turning,ts_balancing);
 	}else if(table->ts == ts_balancing
 		&& table->duration == 0){
 		fprintf(stdout,"from balancing to betting\n");
 		table->ts = ts_betting;
 		table->duration = durations[table->ts];
 		balancing_to_betting();
+		status_change(ts_balancing,ts_betting);
 	}
 	
 	
@@ -1112,9 +1138,11 @@ void init_table(){
 int process_enter_table(struct conn_client * conn_clt,int cmd,cJSON *param){
 	int i;
 	int flag = 0;
+	struct player* player = NULL;
 	for(i = BANKER_POSTION+1;i<MAX_POSTION;i++){
 		struct player* p = table->play_postion[i];
 		if(p && p->usr->id == conn_clt->usr->id){
+			player = p;
 			flag = 1;
 			break;
 		}
@@ -1130,6 +1158,7 @@ int process_enter_table(struct conn_client * conn_clt,int cmd,cJSON *param){
 				p->pt = pt_normal;
 				p->conn_clt = conn_clt;
 				table->play_postion[i] = p;
+				player = p;
 				break;
 			}
 		}
@@ -1139,11 +1168,14 @@ int process_enter_table(struct conn_client * conn_clt,int cmd,cJSON *param){
 	if(i >= MAX_POSTION){
 		ec = ec_full_postion;
 	}
+
+	
+	broadcast_player(player,pa_add);
 	
 	cJSON * resp_param = cJSON_CreateArray();
 	cJSON * ret = NULL;
-	cJSON_AddItemToArray(resp_param,ret = cJSON_CreateNumber(i));
-
+	cJSON_AddItemToArray(resp_param,cJSON_CreateNumber(i));
+	cJSON_AddItemToArray(resp_param,cJSON_CreateNumber(table->ts));
 	send_param(conn_clt->bev,s2c_enter_table,resp_param,ec);
 	cJSON_Delete(resp_param);
 	return 1;
@@ -1169,6 +1201,9 @@ int process_leave_table(struct conn_client * conn_clt,int cmd,cJSON *param){
 	}
 	player->ps = ps_left;
 	player->conn_clt = NULL;
+
+	broadcast_player(player,pa_delete);
+
 	
 	cJSON * resp_param = cJSON_CreateArray();
 	cJSON * ret = NULL;
@@ -1183,7 +1218,7 @@ int process_leave_table(struct conn_client * conn_clt,int cmd,cJSON *param){
 int process_bet(struct conn_client * conn_clt,int cmd,cJSON *param){
 
 	if(table->ts != ts_betting){
-		fprintf(stderr,"can't bet because of now is %s status\n",table->ts);
+		fprintf(stderr,"can't bet because of now is %d status\n",table->ts);
 		return 0;
 	}
 	
@@ -1232,16 +1267,29 @@ int process_bet(struct conn_client * conn_clt,int cmd,cJSON *param){
 		fprintf(stderr,"player do't enter table\n");
 		return 0;
 	}
-	fprintf("befor bet is %d\n",player->bet[pos]);
-	player->bet[pos] += bet;
-	fprintf("after bet is %d\n",player->bet[pos]);
+	enum tally_result tr = tr_ok;
+	int now_moeny = 0;
+	int tret;
+	tret = tally(player->usr->id,-1 * bet,&tr,&now_moeny);
+	int ec = ec_success;
+	if(!tret){
+		fprintf(stderr,"tally failed\n");
+		if(tr == tr_not_enough){
+			ec = ec_not_enouth;
+		}
+	}else{
+		fprintf(stdout,"befor bet is %d\n",player->bet[pos]);
+		player->bet[pos] += bet;
+		fprintf(stdout,"after bet is %d\n",player->bet[pos]);
 
+		update_money(conn_clt,now_moeny);
+		player->usr->money = now_moeny;
+	}
 
 	//notify to others
 	
-
 	cJSON * resp_param = cJSON_CreateArray();
-	send_param(conn_clt->bev,s2c_bet,resp_param,ec_success);
+	send_param(conn_clt->bev,s2c_bet,resp_param,ec);
 	cJSON_Delete(resp_param);
 	return 1;
 }
@@ -1297,7 +1345,6 @@ void turing_to_balancing(){
 		}
 	}
 
-
 	for(i = 0;i<MAX_POSTION;i++){
 		
 		struct player* p = table->play_postion[i];
@@ -1308,14 +1355,29 @@ void turing_to_balancing(){
 			int sum = 0;//for banker
 			for(j = 1;j<4;j++){
 				if(result[j] == 1){
-					result_bet[j] = 2* p->bet[j];
+					result_bet[j] = 0;
  				}else if(result[j] == 0){
-					result_bet[j] = p->bet[j];
+					result_bet[j] = -1 * p->bet[j];
 				}else{
-					result_bet[j] = -2 * p->bet[j];
+					result_bet[j] = -1 * p->bet[j];
 				}
 				sum += result_bet[j];
+				enum tally_result tr;
+				int now_money;
+				int tret;
+				tret = tally(p->usr->id,-1*sum,&tr,&now_money);
+				fprintf(stdout,"sum = %d tr=%d,now_money=%d tret = %d\n",sum,tr,now_money,tret);
+				update_money(p->conn_clt,now_money);
+				p->usr->money = now_money;
 			}
+
+			cJSON* resp_param = cJSON_CreateArray();
+			cJSON* ret = NULL;
+			cJSON_AddItemToArray(resp_param,ret = cJSON_CreateIntArray(result_bet,4));
+			if(p->ps != ps_left){
+				send_param(p->conn_clt->bev,s2c_tally_result,resp_param,ec_success);
+			}
+			cJSON_Delete(resp_param);
 		}
 
 	}
@@ -1381,8 +1443,9 @@ int calc_cards_score(int* cards){
 	return score;
 }
 
-//when tally return 1 ,and then the other out param valid
+//when tally return 1 ,and then the other out param is valid
 //when tally return 0 ,and tr is tr_not_enough,indicate that the user don't have enough money
+//TODO:this function must be add transaction.
 int tally(int id,int money,enum tally_result *tr,int *now_money){
 	sqlite3_stmt * stmt = NULL; 
 	const char *zTail;	
@@ -1428,13 +1491,47 @@ int tally(int id,int money,enum tally_result *tr,int *now_money){
 	ret = sqlite3_step(stmt);
 
 	*now_money = rm;
+	*tr = tr_ok;
 	
 	sqlite3_finalize(stmt);
 	return 1;
 }
 
+void status_change(enum table_status ts_from,enum table_status ts_to){
+	cJSON* resp_param = cJSON_CreateArray();
+	cJSON* ret = NULL;
+	int ss[2] = {ts_from,ts_to};
+	cJSON_AddItemToArray(resp_param,ret = cJSON_CreateIntArray(ss,2));
+	int i;
+	for(i = 0;i<MAX_POSTION;i++){
+		struct player* p = table->play_postion[i];
+		if(p && p->ps != ps_left){
+			send_param(p->conn_clt->bev,s2c_status_change,resp_param,ec_success);
+		}
+	}
+	cJSON_Delete(resp_param);
+}
+
+void broadcast_player(struct player *player,enum player_action pa){
+	cJSON* resp_param = cJSON_CreateArray();
+	cJSON* ret = NULL;
+	cJSON_AddItemToArray(resp_param,ret = cJSON_CreateObject());
+	cJSON_AddStringToObject(ret,"id",player->usr->id);
+	cJSON_AddStringToObject(ret,"head",player->usr->head);
+	cJSON_AddStringToObject(ret,"nickname",player->usr->nickname);
+	cJSON_AddNumberToObject(ret,"money",player->usr->money);
+	
+	cJSON_AddItemToArray(resp_param,cJSON_CreateNumber(pa));
 
 
+	int i;
+	for(i = 0;i<MAX_POSTION;i++){
+		struct player* p = table->play_postion[i];
+		if(p && p->ps != ps_left){
+			send_param(p->conn_clt->bev,s2c_broadcast_player,resp_param,ec_success);
 
-
+		}
+	}
+	cJSON_Delete(resp_param);
+}
 
