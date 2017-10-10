@@ -281,11 +281,7 @@ main(int argc, char **argv)
 
 	L = lua_open();
 	luaL_openlibs(L);
-
 	
-
-	
-
 
 	base = event_base_new();
 	if (!base) {
@@ -390,7 +386,8 @@ uint64_t revert_64(uint64_t p){
 void buildFrame(char* buff,int len,char* buff_out,int *len_out){
 	int pos = 0;
 	buff_out[pos] = (unsigned char)(1 << 7);//fin
-	buff_out[pos] = buff_out[pos] | 0x1;//text frame
+	//buff_out[pos] = buff_out[pos] | 0x1;//text frame
+	buff_out[pos] = buff_out[pos] | 0x2;//binary frame	
 	printf("buff_out[pos]=%02x\n",buff_out[pos]&0xFFu);
 	pos++;
 	buff_out[pos] = 0;//(unsigned char)(1 << 7);//mask
@@ -1073,7 +1070,7 @@ int send_param(struct bufferevent *bev,int cmd,cJSON* param,int ec){
 	cJSON_AddNumberToObject(root,"cmd",cmd);
 	cJSON_AddItemToObject(root,"param",param_copy);
 	cJSON_AddNumberToObject(root,"ec",ec);
-	char* json = cJSON_Print(root);
+	char* json = cJSON_PrintUnformatted(root);
 	int json_len = strlen(json);
 	char* buff = malloc(json_len+8+1);
 	strncpy(buff,"<-------",8);
@@ -1386,6 +1383,17 @@ void turing_to_balancing(){
 
 void balancing_to_betting(){
 	//clear all status
+
+	//clear before bet
+	int i;
+	for(i = 0;i < MAX_POSTION; i++){
+		struct player *p = table->play_postion[i];
+		if(NULL == p){
+			continue;
+		}
+		memset(p->bet,0,sizeof(p->bet));
+	}
+
 	//deal card
 	shuffle_cards();
 
